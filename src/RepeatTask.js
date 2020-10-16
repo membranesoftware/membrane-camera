@@ -1,6 +1,5 @@
 /*
-* Copyright 2019 Membrane Software <author@membranesoftware.com>
-*                 https://membranesoftware.com
+* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -32,9 +31,6 @@
 
 "use strict";
 
-const App = global.App || { };
-const Log = require (App.SOURCE_DIRECTORY + '/Log');
-
 class RepeatTask {
 	constructor () {
 		this.taskFunction = (callback) => {
@@ -61,7 +57,7 @@ class RepeatTask {
 		this.isSuspended = false;
 		this.taskFunction = taskFunction;
 		this.minIntervalPeriod = minIntervalPeriod;
-		if (typeof maxIntervalPeriod == 'number') {
+		if (typeof maxIntervalPeriod == "number") {
 			this.maxIntervalPeriod = maxIntervalPeriod;
 		}
 		else {
@@ -75,8 +71,6 @@ class RepeatTask {
 
 	// Execute the task
 	execute () {
-		let taskFunctionComplete;
-
 		if (this.isExecuting) {
 			return;
 		}
@@ -89,7 +83,7 @@ class RepeatTask {
 		this.isExecuting = true;
 		this.nextRepeatPeriod = 0;
 
-		taskFunctionComplete = () => {
+		const taskFunctionComplete = () => {
 			let delay;
 
 			this.isExecuting = false;
@@ -110,7 +104,6 @@ class RepeatTask {
 				}, delay);
 			}
 		};
-
 		this.taskFunction (taskFunctionComplete, this);
 	}
 
@@ -154,7 +147,5 @@ class RepeatTask {
 			this.execute ();
 		}, msElapsed);
 	}
-
 }
-
 module.exports = RepeatTask;

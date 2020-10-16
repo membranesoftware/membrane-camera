@@ -1,6 +1,5 @@
 /*
-* Copyright 2019 Membrane Software <author@membranesoftware.com>
-*                 https://membranesoftware.com
+* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -33,10 +32,10 @@
 "use strict";
 
 const App = global.App || { };
+const Path = require ("path");
 const Mongo = require ("mongodb").MongoClient;
-const Log = require (App.SOURCE_DIRECTORY + "/Log");
-const FsUtil = require (App.SOURCE_DIRECTORY + "/FsUtil");
-const ExecProcess = require (App.SOURCE_DIRECTORY + "/ExecProcess");
+const FsUtil = require (Path.join (App.SOURCE_DIRECTORY, "FsUtil"));
+const ExecProcess = require (Path.join (App.SOURCE_DIRECTORY, "ExecProcess"));
 
 class DataStore {
 	constructor (runPath, dataPath, listenPort) {
@@ -45,18 +44,18 @@ class DataStore {
 		this.dbUrl = "";
 
 		// Read-write data members
-		this.dbHost = App.STORE_HOST;
-		this.dbUsername = App.STORE_USERNAME;
-		this.dbPassword = App.STORE_PASSWORD;
-		this.dbName = App.STORE_DATABASE;
-		this.collectionName = App.STORE_COLLECTION;
+		this.dbHost = App.StoreHost;
+		this.dbUsername = App.StoreUsername;
+		this.dbPassword = App.StorePassword;
+		this.dbName = App.StoreDatabase;
+		this.collectionName = App.StoreCollection;
 
 		this.storeRunPath = "/usr/bin/mongod";
 		if (typeof runPath == "string") {
 			this.storeRunPath = runPath;
 		}
 
-		this.storeDataPath = App.DATA_DIRECTORY + "/datastore";
+		this.storeDataPath = Path.join (App.DATA_DIRECTORY, "datastore");
 		if (typeof dataPath == "string") {
 			this.storeDataPath = dataPath;
 		}
@@ -73,7 +72,8 @@ class DataStore {
 	// Return a promise that launches the data store process if it isn't already running
 	run () {
 		return (new Promise ((resolve, reject) => {
-			let started, proc, storeProcessData, storeProcessEnded;
+			let started, proc;
+
 			if (this.storeProcess != null) {
 				resolve ();
 				return;
@@ -84,9 +84,9 @@ class DataStore {
 				let conf;
 
 				conf = `dbpath=${this.storeDataPath}\n`;
-				conf += `bind_ip=127.0.0.1\n`;
-				conf += `journal=false\n`;
-				conf += `auth=false\n`;
+				conf += "bind_ip=127.0.0.1\n";
+				conf += "journal=false\n";
+				conf += "auth=false\n";
 				conf += `port=${this.storeListenPort}\n`;
 				return (FsUtil.writeFile (`${this.storeDataPath}/mongod.conf`, conf, { mode: 0o600 }));
 			}).then (() => {
@@ -96,10 +96,10 @@ class DataStore {
 				reject (err);
 			});
 
-			storeProcessData = (lines, dataParseCallback) => {
+			const storeProcessData = (lines, dataParseCallback) => {
 				if (! started) {
-					for (let line of lines) {
-						if (line.indexOf ("waiting for connections on port " + this.storeListenPort) >= 0) {
+					for (const line of lines) {
+						if (line.indexOf (`waiting for connections on port ${this.storeListenPort}`) >= 0) {
 							started = true;
 							break;
 						}
@@ -114,7 +114,7 @@ class DataStore {
 				process.nextTick (dataParseCallback);
 			};
 
-			storeProcessEnded = (err, isExitSuccess) => {
+			const storeProcessEnded = (err, isExitSuccess) => {
 				if (! started) {
 					reject (Error ("Store process ended unexpectedly"));
 				}
@@ -139,20 +139,18 @@ class DataStore {
 
 	// Open the data store and invoke the provided callback when complete, with an "err" parameter (non-null if an error occurred). If a callback is not provided, instead return a promise that resolves if the operation succeeds or rejects if it doesn't.
 	open (endCallback) {
-		let execute = (executeCallback) => {
-			let connectComplete, authenticateComplete;
-
+		const execute = (executeCallback) => {
 			if (this.mongo != null) {
 				process.nextTick (executeCallback);
 				return;
 			}
 
-			this.dbUrl = "mongodb://" + this.dbHost + ":" + this.storeListenPort + "/" + this.dbName;
+			this.dbUrl = `mongodb:${App.DoubleSlash}${this.dbHost}:${this.storeListenPort}/${this.dbName}`;
 
 			setTimeout (() => {
 				Mongo.connect (this.dbUrl, { useNewUrlParser: true }, connectComplete);
 			}, 0);
-			connectComplete = (err, mongo) => {
+			const connectComplete = (err, mongo) => {
 				if (err != null) {
 					executeCallback (err);
 					return;
@@ -167,13 +165,14 @@ class DataStore {
 				}
 			};
 
-			authenticateComplete = (err, res) => {
+			const authenticateComplete = (err, res) => {
 				if (err != null) {
 					this.mongo.close ();
 					this.mongo = null;
 					executeCallback (err);
 					return;
 				}
+
 				executeCallback ();
 			}
 		};
@@ -204,16 +203,14 @@ class DataStore {
 
 	// Store a record and invoke the provided callback when complete, with an "err" parameter. If a callback is not provided, instead return a promise that resolves if the operation succeeds or rejects if it doesn't.
 	storeRecord (record, endCallback) {
-		let execute = (executeCallback) => {
-			let db, collection;
-
+		const execute = (executeCallback) => {
 			if (this.mongo == null) {
 				executeCallback ("Store connection not established");
 				return;
 			}
 
-			db = this.mongo.db (this.dbName);
-			collection = db.collection (this.collectionName);
+			const db = this.mongo.db (this.dbName);
+			const collection = db.collection (this.collectionName);
 			collection.insert (record, (err, result) => {
 				executeCallback (err);
 			});
@@ -237,9 +234,7 @@ class DataStore {
 
 	// Update records and invoke the provided callback when complete, with an "err" parameter. If a callback is not provided, instead return a promise that resolves if the operation succeeds or rejects if it doesn't.
 	updateRecords (criteria, update, options, endCallback) {
-		let execute = (executeCallback) => {
-			let db, collection;
-
+		const execute = (executeCallback) => {
 			if (this.mongo == null) {
 				process.nextTick (() => {
 					executeCallback ("Store connection not established");
@@ -247,8 +242,8 @@ class DataStore {
 				return;
 			}
 
-			db = this.mongo.db (this.dbName);
-			collection = db.collection (this.collectionName);
+			const db = this.mongo.db (this.dbName);
+			const collection = db.collection (this.collectionName);
 			collection.update (criteria, update, options, executeCallback);
 		};
 
@@ -270,9 +265,7 @@ class DataStore {
 
 	// Check if a record matching the specified MongoDB criteria exists. Invokes the provided callback when complete, with "err" and "recordCount" parameters. If a callback is not provided, instead return a promise that resolves if the operation succeeds or rejects if it doesn't.
 	countRecords (criteria, endCallback) {
-		let execute = (executeCallback) => {
-			let db, collection, cursor;
-
+		const execute = (executeCallback) => {
 			if (this.mongo == null) {
 				process.nextTick (() => {
 					executeCallback ("Store connection not established", null);
@@ -280,9 +273,9 @@ class DataStore {
 				return;
 			}
 
-			db = this.mongo.db (this.dbName);
-			collection = db.collection (this.collectionName);
-			cursor = collection.find (criteria);
+			const db = this.mongo.db (this.dbName);
+			const collection = db.collection (this.collectionName);
+			const cursor = collection.find (criteria);
 			cursor.count (true, { }, (err, count) => {
 				if (err != null) {
 					executeCallback (err, null);
@@ -311,8 +304,6 @@ class DataStore {
 
 	// Check if a record matching the specified MongoDB criteria exists. Invokes the provided callback when complete, with "err" and "exists" parameters.
 	recordExists (criteria, callback) {
-		let db, collection, cursor;
-
 		if (this.mongo == null) {
 			process.nextTick (() => {
 				callback ("Store connection not established", null);
@@ -320,9 +311,9 @@ class DataStore {
 			return;
 		}
 
-		db = this.mongo.db (this.dbName);
-		collection = db.collection (this.collectionName);
-		cursor = collection.find (criteria);
+		const db = this.mongo.db (this.dbName);
+		const collection = db.collection (this.collectionName);
+		const cursor = collection.find (criteria);
 		cursor.count (true, { limit: 1 }, (err, count) => {
 			if (err != null) {
 				callback (err, null);
@@ -335,11 +326,9 @@ class DataStore {
 
 	// Search the data store for records using the provided MongoDB criteria, sort specification, and options. Invokes the provided callback when complete, with "err" (non-null if an error occurred) and "records" (array of result objects) parameters. If a callback is not provided, instead return a promise that resolves if the operation succeeds or rejects if it doesn't.
 	findAllRecords (criteria, sort, maxResults, skipCount, endCallback) {
-		let execute = (executeCallback) => {
-			let records, findCallback;
-
-			records = [ ];
-			findCallback = (err, record) => {
+		const execute = (executeCallback) => {
+			const records = [ ];
+			const findCallback = (err, record) => {
 				if (err != null) {
 					executeCallback (err, null);
 					return;
@@ -374,8 +363,6 @@ class DataStore {
 
 	// Search the data store for records using the provided MongoDB criteria, sort specification, and options. Invokes the provided callback on each record found, with "err" and "record" parameters. err is non-null if an error was encountered, while record is null if the end of the list was reached. sort can be null if not needed, causing results to be generated in unspecified order.
 	findRecords (findCallback, criteria, sort, maxResults, skipCount) {
-		let db, options, collection, cursor;
-
 		if (this.mongo == null) {
 			process.nextTick (() => {
 				findCallback ("Store connection not established", null);
@@ -383,9 +370,9 @@ class DataStore {
 			return;
 		}
 
-		db = this.mongo.db (this.dbName);
-		collection = db.collection (this.collectionName);
-		options = { };
+		const db = this.mongo.db (this.dbName);
+		const collection = db.collection (this.collectionName);
+		const options = { };
 		if ((typeof sort == "object") && (sort != null)) {
 			options.sort = sort;
 		}
@@ -396,7 +383,7 @@ class DataStore {
 			options.skip = skipCount;
 		}
 
-		cursor = collection.find (criteria, options);
+		const cursor = collection.find (criteria, options);
 		cursor.hasNext (hasNextComplete);
 
 		function hasNextComplete (err, result) {
@@ -433,8 +420,6 @@ class DataStore {
 
 	// Remove records matching the provided MongoDB criteria. Invokes the provided callback when complete, with an "err" parameter.
 	removeRecords (criteria, callback) {
-		let db, collection;
-
 		if (this.mongo == null) {
 			process.nextTick (() => {
 				callback ("Store connection not established", null);
@@ -442,15 +427,13 @@ class DataStore {
 			return;
 		}
 
-		db = this.mongo.db (this.dbName);
-		collection = db.collection (this.collectionName);
+		const db = this.mongo.db (this.dbName);
+		const collection = db.collection (this.collectionName);
 		collection.remove (criteria, callback);
 	}
 
 	// Create an index for the collection and invoke the provided callback when complete, with an "err" parameter (non-null if an error occurred)
 	createIndex (keys, options, callback) {
-		let db, collection;
-
 		if (this.mongo == null) {
 			process.nextTick (() => {
 				callback ("Store connection not established", null);
@@ -458,8 +441,8 @@ class DataStore {
 			return;
 		}
 
-		db = this.mongo.db (this.dbName);
-		collection = db.collection (this.collectionName);
+		const db = this.mongo.db (this.dbName);
+		const collection = db.collection (this.collectionName);
 		collection.createIndex (keys, options, createIndexComplete);
 		function createIndexComplete (err) {
 			callback (err);
@@ -472,11 +455,10 @@ class DataStore {
 
 		key = searchKey;
 		key = key.trim ();
-		key = key.replace (/[^0-9a-zA-Z\* ]/g, '');
-		key = key.replace (/\*/g, '.*');
+		key = key.replace (/[^0-9a-zA-Z* ]/g, "");
+		key = key.replace (/\*/g, ".*");
 
 		return (key);
 	}
 }
-
 module.exports = DataStore;

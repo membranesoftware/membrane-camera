@@ -1,6 +1,5 @@
 /*
-* Copyright 2019 Membrane Software <author@membranesoftware.com>
-*                 https://membranesoftware.com
+* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -28,68 +27,60 @@
 * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 * POSSIBILITY OF SUCH DAMAGE.
 */
-// Parser for HLS index data
+// Class that holds strings for use in UI text
+
+"use strict";
 
 const App = global.App || { };
-const Log = require (App.SOURCE_DIRECTORY + "/Log");
+const Path = require ("path");
+const Log = require (Path.join (App.SOURCE_DIRECTORY, "Log"));
 
-// Return an object containing records parsed from the provided index data, or null if the data could not be parsed
-function parse (indexData) {
-	var data, lines, i, line, m, lastduration, pos, val;
+const DefaultLanguage = "en";
 
-	if (typeof indexData != "string") {
-		return (null);
+class UiText {
+	constructor (language) {
+		this.strings = { };
+		this.load (language);
 	}
 
-	data = {
-		segmentCount: 0,
-		segmentFilenames: [ ],
-		segmentLengths: [ ],
-		segmentPositions: [ ],
-		hlsTargetDuration: 0
-	};
-	lastduration = null;
-	pos = 0;
-	lines = indexData.split ("\n");
-	for (i = 0; i < lines.length; ++i) {
-		line = lines[i];
+	// Load text strings of the desired language, or the default language if not specified
+	load (language) {
+		let strings;
 
-		m = line.match (/^#EXTINF:([0-9\.]+)/);
-		if (m != null) {
-			lastduration = parseFloat (m[1]);
-			if (isNaN (lastduration)) {
-				lastduration = null;
+		if ((typeof language == "string") && (language != "")) {
+			try {
+				strings = require (Path.join (App.SOURCE_DIRECTORY, "UiText", `${language}.js`));
 			}
-			continue;
+			catch (err) {
+				Log.warn (`Failed to load text strings; language=${language} err=${err}`);
+				strings = null;
+			}
+
+			if (strings != null) {
+				Log.debug (`Loaded text strings; language=${language}`);
+				this.strings = strings;
+				return;
+			}
 		}
 
-		m = line.match (/^(.+)\.ts/);
-		if (m != null) {
-			if (lastduration !== null) {
-				++(data.segmentCount);
-				data.segmentFilenames.push (line);
-				data.segmentLengths.push (lastduration);
-				data.segmentPositions.push (parseFloat (pos.toFixed (5)));
-				pos += lastduration;
-				lastduration = null;
-			}
-			continue;
+		language = DefaultLanguage;
+		try {
+			strings = require (Path.join (App.SOURCE_DIRECTORY, "UiText", `${language}.js`));
 		}
-
-		m = line.match (/^#EXT-X-TARGETDURATION:([0-9]+)/);
-		if (m != null) {
-			val = parseInt (m[1], 10);
-			if (! isNaN (val)) {
-				data.hlsTargetDuration = val;
-			}
-			continue;
+		catch (err) {
+			Log.warn (`Failed to load text strings; language=${language} err=${err}`);
+			strings = null;
+		}
+		if (strings != null) {
+			Log.debug (`Loaded text strings; language=${language}`);
+			this.strings = strings;
 		}
 	}
 
-	if (data.segmentCount <= 0) {
-		return (null);
+	// Return the text string matching the specified key, or an empty string if no such string was found
+	getText (key) {
+		const s = this.strings[key];
+		return ((typeof s == "string") ? s : "");
 	}
-
-	return (data);
 }
-exports.parse = parse;
+module.exports = UiText;

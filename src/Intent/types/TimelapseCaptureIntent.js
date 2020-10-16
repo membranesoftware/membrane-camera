@@ -1,6 +1,5 @@
 /*
-* Copyright 2019 Membrane Software <author@membranesoftware.com>
-*                 https://membranesoftware.com
+* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -35,28 +34,26 @@ const Fs = require ("fs");
 const Path = require ("path");
 const EventEmitter = require ("events").EventEmitter;
 const Async = require ("async");
-const Result = require (App.SOURCE_DIRECTORY + "/Result");
-const Log = require (App.SOURCE_DIRECTORY + "/Log");
-const FsUtil = require (App.SOURCE_DIRECTORY + "/FsUtil");
-const SystemAgent = require (App.SOURCE_DIRECTORY + "/SystemAgent");
-const SystemInterface = require (App.SOURCE_DIRECTORY + "/SystemInterface");
-const ExecProcess = require (App.SOURCE_DIRECTORY + "/ExecProcess");
-const IntentBase = require (App.SOURCE_DIRECTORY + "/Intent/IntentBase");
+const Result = require (Path.join (App.SOURCE_DIRECTORY, "Result"));
+const Log = require (Path.join (App.SOURCE_DIRECTORY, "Log"));
+const FsUtil = require (Path.join (App.SOURCE_DIRECTORY, "FsUtil"));
+const SystemInterface = require (Path.join (App.SOURCE_DIRECTORY, "SystemInterface"));
+const ExecProcess = require (Path.join (App.SOURCE_DIRECTORY, "ExecProcess"));
+const IntentBase = require (Path.join (App.SOURCE_DIRECTORY, "Intent", "IntentBase"));
 
-const CAPTURE_PROCESS_NAME = "/usr/bin/raspistill";
-const MAX_IMAGE_WIDTH = 3280;
-const MAX_IMAGE_HEIGHT = 2464;
-const MAX_CAPTURE_DIRECTORY_COUNT = 4096;
-const PRUNE_TRIGGER_PERCENT = 98; // Percent of total storage space used
-const PRUNE_TARGET_PERCENT = 96; // Percent of total storage space used
-const CAPTURE_IDLE_EVENT_NAME = "captureIdle";
+const CaptureProcessName = "/usr/bin/raspistill";
+const MaxImageWidth = 3280;
+const MaxImageHeight = 2464;
+const MaxCaptureDirectoryCount = 4096;
+const PruneTriggerPercent = 98; // Percent of total storage space used
+const PruneTargetPercent = 96; // Percent of total storage space used
+const CaptureIdleEventName = "captureIdle";
 
 class TimelapseCaptureIntent extends IntentBase {
 	constructor () {
 		super ();
 		this.name = "TimelapseCaptureIntent";
 		this.displayName = "Capture timelapse images";
-		this.description = "Capture images continuously at fixed intervals and store the resulting image files";
 		this.stateType = "TimelapseCaptureIntentState";
 
 		this.captureDirectoryTimes = [ ];
@@ -80,41 +77,35 @@ class TimelapseCaptureIntent extends IntentBase {
 			callback ();
 		}
 		else {
-			this.eventEmitter.once (CAPTURE_IDLE_EVENT_NAME, callback);
+			this.eventEmitter.once (CaptureIdleEventName, callback);
 		}
 	}
 
 	// Configure the intent's state using values in the provided params object and return a Result value
 	doConfigure (configParams) {
 		this.state.capturePeriod = configParams.capturePeriod;
-		this.state.imageProfile = configParams.imageProfile;
 
-		return (Result.SUCCESS);
+		return (Result.Success);
 	}
 
 	// Perform actions appropriate when the intent becomes active
 	doStart () {
-		let max;
-
 		if (typeof this.state.nextCaptureTime != "number") {
 			this.state.nextCaptureTime = 0;
 		}
 
-		max = new Date ().getTime () + (this.state.capturePeriod * 1000);
+		const max = Date.now () + (this.state.capturePeriod * 1000);
 		if (this.state.nextCaptureTime > max) {
 			this.state.nextCaptureTime = max;
 		}
 
-		this.dataPath = Path.join (App.DATA_DIRECTORY, App.CAMERA_CACHE_PATH);
-	}
-
-	// Perform actions appropriate when the intent becomes inactive
-	doStop () {
-
+		this.dataPath = Path.join (App.DATA_DIRECTORY, App.CameraCachePath);
 	}
 
 	// Perform actions appropriate for the current state of the application
 	doUpdate () {
+		let shouldcapture;
+
 		if (! this.isCaptureReady) {
 			if (! this.isScanningDirectory) {
 				this.scanDirectory ();
@@ -123,7 +114,17 @@ class TimelapseCaptureIntent extends IntentBase {
 		}
 
 		if (! this.isCapturing) {
+			shouldcapture = false;
 			if (this.updateTime >= this.state.nextCaptureTime) {
+				shouldcapture = true;
+			}
+			if (shouldcapture) {
+				const server = App.systemAgent.getServer ("CameraServer");
+				if ((server != null) && server.isCapturingVideo) {
+					shouldcapture = false;
+				}
+			}
+			if (shouldcapture) {
 				this.captureImage ();
 				this.state.nextCaptureTime = this.updateTime + (this.state.capturePeriod * 1000);
 			}
@@ -152,43 +153,46 @@ class TimelapseCaptureIntent extends IntentBase {
 
 	// Execute operations to capture and store a camera image
 	captureImage () {
-		let now, imagepath, imagewidth, imageheight, imagetime;
+		let imagepath, imageprofile, imagewidth, imageheight, imagetime;
 
 		this.isCapturing = true;
-		if ((this.capturePath == "") || (this.capturePathCount >= MAX_CAPTURE_DIRECTORY_COUNT)) {
-			now = new Date ().getTime ();
-			this.capturePath = Path.join (this.dataPath, "" + now);
+		if ((this.capturePath == "") || (this.capturePathCount >= MaxCaptureDirectoryCount)) {
+			const now = Date.now ();
+			this.capturePath = Path.join (this.dataPath, `${now}`);
 			this.captureDirectoryTimes.push (now);
 			this.capturePathCount = 0;
 		}
 		FsUtil.createDirectory (this.capturePath).then (() => {
 			return (new Promise ((resolve, reject) => {
-				let args, proc;
-
-				args = [
+				const args = [
 					"-t", "1",
 					"-e", "jpg",
 					"-q", "97"
 				];
-				switch (this.state.imageProfile) {
+
+				imageprofile = SystemInterface.Constant.DefaultImageProfile;
+				if ((App.systemAgent.runState.cameraConfiguration != null) && (typeof App.systemAgent.runState.cameraConfiguration.imageProfile == "number")) {
+					imageprofile = App.systemAgent.runState.cameraConfiguration.imageProfile;
+				}
+				switch (imageprofile) {
 					case SystemInterface.Constant.HighQualityImageProfile: {
-						imagewidth = MAX_IMAGE_WIDTH;
-						imageheight = MAX_IMAGE_HEIGHT;
+						imagewidth = MaxImageWidth;
+						imageheight = MaxImageHeight;
 						break;
 					}
 					case SystemInterface.Constant.LowQualityImageProfile: {
-						imagewidth = Math.floor (MAX_IMAGE_WIDTH / 4);
-						imageheight = Math.floor (MAX_IMAGE_HEIGHT / 4);
+						imagewidth = Math.floor (MaxImageWidth / 4);
+						imageheight = Math.floor (MaxImageHeight / 4);
 						break;
 					}
 					case SystemInterface.Constant.LowestQualityImageProfile: {
-						imagewidth = Math.floor (MAX_IMAGE_WIDTH / 8);
-						imageheight = Math.floor (MAX_IMAGE_HEIGHT / 8);
+						imagewidth = Math.floor (MaxImageWidth / 8);
+						imageheight = Math.floor (MaxImageHeight / 8);
 						break;
 					}
 					default: {
-						imagewidth = Math.floor (MAX_IMAGE_WIDTH / 2);
-						imageheight = Math.floor (MAX_IMAGE_HEIGHT / 2);
+						imagewidth = Math.floor (MaxImageWidth / 2);
+						imageheight = Math.floor (MaxImageHeight / 2);
 						break;
 					}
 				}
@@ -202,10 +206,28 @@ class TimelapseCaptureIntent extends IntentBase {
 				args.push ("-w", imagewidth);
 				args.push ("-h", imageheight);
 
-				imagetime = new Date ().getTime ();
+				if ((App.systemAgent.runState.cameraConfiguration != null) && (typeof App.systemAgent.runState.cameraConfiguration.flip == "number")) {
+					switch (App.systemAgent.runState.cameraConfiguration.flip) {
+						case SystemInterface.Constant.HorizontalFlip: {
+							args.push ("-hf");
+							break;
+						}
+						case SystemInterface.Constant.VerticalFlip: {
+							args.push ("-vf");
+							break;
+						}
+						case SystemInterface.Constant.HorizontalAndVerticalFlip: {
+							args.push ("-hf");
+							args.push ("-vf");
+							break;
+						}
+					}
+				}
+
+				imagetime = Date.now ();
 				imagepath = Path.join (this.capturePath, `${imagetime}_${imagewidth}x${imageheight}.jpg`);
 				args.push ("-o", imagepath);
-				proc = new ExecProcess (CAPTURE_PROCESS_NAME, args, { }, this.dataPath, null, (err, isExitSuccess) => {
+				new ExecProcess (CaptureProcessName, args, { }, this.dataPath, null, (err, isExitSuccess) => {
 					if (err != null) {
 						reject (err);
 						return;
@@ -229,14 +251,13 @@ class TimelapseCaptureIntent extends IntentBase {
 		}).then (() => {
 			return (this.pruneCacheFiles ());
 		}).then (() => {
-			let server;
-
 			this.lastCaptureFile = imagepath;
 			this.lastCaptureTime = imagetime;
 			this.lastCaptureWidth = imagewidth;
 			this.lastCaptureHeight = imageheight;
 			++(this.capturePathCount);
-			server = App.systemAgent.getServer ("CameraServer");
+
+			const server = App.systemAgent.getServer ("CameraServer");
 			if (server != null) {
 				server.captureDirectoryTimes = this.captureDirectoryTimes;
 				server.lastCaptureFile = this.lastCaptureFile;
@@ -252,38 +273,36 @@ class TimelapseCaptureIntent extends IntentBase {
 			Log.err (`${this.toString ()} failed to capture image; capturePath=${this.capturePath} err=${err}`);
 		}).then (() => {
 			this.isCapturing = false;
-			this.eventEmitter.emit (CAPTURE_IDLE_EVENT_NAME);
+			this.eventEmitter.emit (CaptureIdleEventName);
 		});
 	}
 
 	// Return a promise that removes the oldest files from the cache as needed to maintain the configured percentage of free storage space
 	pruneCacheFiles () {
 		return (new Promise ((resolve, reject) => {
-			let server, pct, bytes, targetbytes, dirpath, imagefiles, shouldrefresh;
+			let bytes, shouldrefresh;
 
-			server = App.systemAgent.getServer ("CameraServer");
+			const server = App.systemAgent.getServer ("CameraServer");
 			if ((server == null) || (server.totalStorage <= 0) || (this.captureDirectoryTimes.length <= 0)) {
 				resolve ();
 				return;
 			}
 
 			bytes = server.freeStorage;
-			pct = 100 - ((bytes / server.totalStorage) * 100);
-			if (pct < PRUNE_TRIGGER_PERCENT) {
+			const pct = 100 - ((bytes / server.totalStorage) * 100);
+			if (pct < PruneTriggerPercent) {
 				resolve ();
 				return;
 			}
 
 			shouldrefresh = false;
-			targetbytes = Math.floor ((server.totalStorage * (100 - PRUNE_TARGET_PERCENT)) / 100);
-			dirpath = Path.join (this.dataPath, "" + this.captureDirectoryTimes[0]);
+			const targetbytes = Math.floor ((server.totalStorage * (100 - PruneTargetPercent)) / 100);
+			const dirpath = Path.join (this.dataPath, `${this.captureDirectoryTimes[0]}`);
 			FsUtil.readDirectory (dirpath).then ((files) => {
-				let f, imagefiles, targetfiles;
-
-				imagefiles = [ ];
-				targetfiles = [ ];
-				for (let file of files) {
-					f = TimelapseCaptureIntent.parseImageFilename (file);
+				const imagefiles = [ ];
+				const targetfiles = [ ];
+				for (const file of files) {
+					const f = TimelapseCaptureIntent.parseImageFilename (file);
 					if (f != null) {
 						imagefiles.push (Path.join (dirpath, file));
 					}
@@ -303,9 +322,7 @@ class TimelapseCaptureIntent extends IntentBase {
 				});
 
 				return (new Promise ((resolve, reject) => {
-					let statFile, endSeries;
-
-					statFile = (file, callback) => {
+					const statFile = (file, callback) => {
 						FsUtil.statFile (file, (err, stats) => {
 							if (err != null) {
 								callback (err);
@@ -320,7 +337,7 @@ class TimelapseCaptureIntent extends IntentBase {
 						});
 					};
 
-					endSeries = (err) => {
+					const endSeries = (err) => {
 						if (err != null) {
 							reject (err);
 							return;
@@ -328,18 +345,18 @@ class TimelapseCaptureIntent extends IntentBase {
 
 						resolve (targetfiles);
 					};
+
 					Async.eachSeries (imagefiles, statFile, endSeries);
 				}));
 			}).then ((targetFiles) => {
 				return (new Promise ((resolve, reject) => {
-					let unlinkFile, endSeries;
 					if (targetFiles.length <= 0) {
 						resolve ();
 						return;
 					}
 
 					shouldrefresh = true;
-					unlinkFile = (file, callback) => {
+					const unlinkFile = (file, callback) => {
 						Fs.unlink (file, (err) => {
 							if (err != null) {
 								callback (err);
@@ -350,7 +367,7 @@ class TimelapseCaptureIntent extends IntentBase {
 						});
 					};
 
-					endSeries = (err) => {
+					const endSeries = (err) => {
 						if (err != null) {
 							reject (err);
 							return;
@@ -367,6 +384,7 @@ class TimelapseCaptureIntent extends IntentBase {
 				if ((! Array.isArray (files)) || (files.length > 0)) {
 					return (Promise.resolve ());
 				}
+
 				shouldrefresh = true;
 				return (new Promise ((resolve, reject) => {
 					Fs.rmdir (dirpath, (err) => {
@@ -382,6 +400,7 @@ class TimelapseCaptureIntent extends IntentBase {
 				if (! shouldrefresh) {
 					return (Promise.resolve (null));
 				}
+
 				return (TimelapseCaptureIntent.readCacheSummary (this.dataPath));
 			}).then ((resultObject) => {
 				if (resultObject != null) {
@@ -409,16 +428,14 @@ class TimelapseCaptureIntent extends IntentBase {
 
 // Parse the provided capture image filename and return an object with the resulting fields, or null if the parse failed
 TimelapseCaptureIntent.parseImageFilename = function (filename) {
-	let matches, t, w, h;
-
-	matches = filename.match (/^([0-9]+)_([0-9]+)x([0-9]+)\.jpg$/);
+	const matches = filename.match (/^([0-9]+)_([0-9]+)x([0-9]+)\.jpg$/);
 	if (matches == null) {
 		return (null);
 	}
 
-	t = parseInt (matches[1], 10);
-	w = parseInt (matches[2], 10);
-	h = parseInt (matches[3], 10);
+	const t = parseInt (matches[1], 10);
+	const w = parseInt (matches[2], 10);
+	const h = parseInt (matches[3], 10);
 	if (isNaN (t) || isNaN (w) || isNaN (h)) {
 		return (null);
 	}
@@ -433,9 +450,7 @@ TimelapseCaptureIntent.parseImageFilename = function (filename) {
 // Return a promise that reads summary metadata from files in the specified cache path
 TimelapseCaptureIntent.readCacheSummary = function (cachePath) {
 	return (new Promise ((resolve, reject) => {
-		let result;
-
-		result = {
+		const result = {
 			captureDirectoryTimes: [ ],
 			minCaptureTime: 0,
 			lastCaptureFile: "",
@@ -447,13 +462,7 @@ TimelapseCaptureIntent.readCacheSummary = function (cachePath) {
 		};
 		FsUtil.readDirectory (cachePath).then ((files) => {
 			return (new Promise ((resolve, reject) => {
-				let statDirectory, endSeries;
-
-				setTimeout (() => {
-					Async.eachSeries (files, statDirectory, endSeries);
-				}, 0);
-
-				statDirectory = (file, callback) => {
+				const statDirectory = (file, callback) => {
 					if (! file.match (/^[0-9]+$/)) {
 						process.nextTick (callback);
 						return;
@@ -466,7 +475,7 @@ TimelapseCaptureIntent.readCacheSummary = function (cachePath) {
 					});
 				};
 
-				endSeries = (err) => {
+				const endSeries = (err) => {
 					if (err != null) {
 						reject (Error (err));
 						return;
@@ -482,6 +491,8 @@ TimelapseCaptureIntent.readCacheSummary = function (cachePath) {
 					});
 					resolve ();
 				};
+
+				Async.eachSeries (files, statDirectory, endSeries);
 			}));
 		}).then (() => {
 			return (new Promise ((resolve, reject) => {
@@ -490,16 +501,14 @@ TimelapseCaptureIntent.readCacheSummary = function (cachePath) {
 					return;
 				}
 
-				FsUtil.readDirectory (Path.join (cachePath, "" + result.captureDirectoryTimes[0]), (err, files) => {
-					let f;
-
+				FsUtil.readDirectory (Path.join (cachePath, `${result.captureDirectoryTimes[0]}`), (err, files) => {
 					if (err != null) {
 						reject (Error (err));
 						return;
 					}
 
-					for (let file of files) {
-						f = TimelapseCaptureIntent.parseImageFilename (file);
+					for (const file of files) {
+						const f = TimelapseCaptureIntent.parseImageFilename (file);
 						if ((f != null) && (f.time > 0)) {
 							if ((result.minCaptureTime <= 0) || (f.time < result.minCaptureTime)) {
 								result.minCaptureTime = f.time;
@@ -517,10 +526,8 @@ TimelapseCaptureIntent.readCacheSummary = function (cachePath) {
 					return;
 				}
 
-				result.capturePath = Path.join (cachePath, "" + result.captureDirectoryTimes[result.captureDirectoryTimes.length - 1]);
+				result.capturePath = Path.join (cachePath, `${result.captureDirectoryTimes[result.captureDirectoryTimes.length - 1]}`);
 				FsUtil.readDirectory (result.capturePath, (err, files) => {
-					let f;
-
 					if (err != null) {
 						reject (Error (err));
 						return;
@@ -529,8 +536,8 @@ TimelapseCaptureIntent.readCacheSummary = function (cachePath) {
 					result.lastCaptureFile = "";
 					result.lastCaptureTime = 0;
 					result.capturePathCount = 0;
-					for (let file of files) {
-						f = TimelapseCaptureIntent.parseImageFilename (file);
+					for (const file of files) {
+						const f = TimelapseCaptureIntent.parseImageFilename (file);
 						if ((f != null) && (f.time > 0)) {
 							++(result.capturePathCount);
 							if (f.time > result.lastCaptureTime) {
@@ -560,9 +567,9 @@ TimelapseCaptureIntent.readCacheSummary = function (cachePath) {
 // Return a promise that finds cache images in the range specified by the provided FindCaptureImages command, resolving with a set of FindCaptureImagesResult fields if successful
 TimelapseCaptureIntent.findCaptureImages = function (cmdInv, cameraServer) {
 	return (new Promise ((resolve, reject) => {
-		let result, mintime, maxtime, i, dirpaths, sortCompare, readDirectory, endSeries;
+		let mintime, maxtime, i, sortCompare;
 
-		result = {
+		const result = {
 			captureTimes: [ ]
 		};
 		if ((! Array.isArray (cameraServer.captureDirectoryTimes)) || (cameraServer.captureDirectoryTimes.length <= 0)) {
@@ -578,7 +585,7 @@ TimelapseCaptureIntent.findCaptureImages = function (cmdInv, cameraServer) {
 			maxtime = cameraServer.lastCaptureTime;
 		}
 
-		dirpaths = [ ];
+		const dirpaths = [ ];
 		if (cmdInv.params.isDescending) {
 			i = cameraServer.captureDirectoryTimes.length - 1;
 			while (i > 0) {
@@ -588,7 +595,7 @@ TimelapseCaptureIntent.findCaptureImages = function (cmdInv, cameraServer) {
 				--i;
 			}
 			while (i >= 0) {
-				dirpaths.push (Path.join (cameraServer.cacheDataPath, "" + cameraServer.captureDirectoryTimes[i]));
+				dirpaths.push (Path.join (cameraServer.cacheDataPath, `${cameraServer.captureDirectoryTimes[i]}`));
 				--i;
 			}
 
@@ -611,7 +618,7 @@ TimelapseCaptureIntent.findCaptureImages = function (cmdInv, cameraServer) {
 				++i;
 			}
 			while (i < cameraServer.captureDirectoryTimes.length) {
-				dirpaths.push (Path.join (cameraServer.cacheDataPath, "" + cameraServer.captureDirectoryTimes[i]));
+				dirpaths.push (Path.join (cameraServer.cacheDataPath, `${cameraServer.captureDirectoryTimes[i]}`));
 				++i;
 			}
 
@@ -625,32 +632,28 @@ TimelapseCaptureIntent.findCaptureImages = function (cmdInv, cameraServer) {
 				return (0);
 			};
 		}
-		setTimeout (() => {
-			Async.eachSeries (dirpaths, readDirectory, endSeries);
-		}, 0);
-		readDirectory = (path, callback) => {
+
+		const readDirectory = (path, callback) => {
 			if ((cmdInv.params.maxResults > 0) && (result.captureTimes.length >= cmdInv.params.maxResults)) {
 				process.nextTick (callback);
 				return;
 			}
 			FsUtil.readDirectory (path, (err, files) => {
-				let f, times;
-
 				if (err != null) {
 					callback (err);
 					return;
 				}
 
-				times = [ ];
-				for (let file of files) {
-					f = TimelapseCaptureIntent.parseImageFilename (file);
+				const times = [ ];
+				for (const file of files) {
+					const f = TimelapseCaptureIntent.parseImageFilename (file);
 					if (f != null) {
 						times.push (f.time);
 					}
 				}
 				times.sort (sortCompare);
 
-				for (let t of times) {
+				for (const t of times) {
 					if ((t >= mintime) && (t <= maxtime)) {
 						result.captureTimes.push (t);
 						if ((cmdInv.params.maxResults > 0) && (result.captureTimes.length >= cmdInv.params.maxResults)) {
@@ -663,23 +666,25 @@ TimelapseCaptureIntent.findCaptureImages = function (cmdInv, cameraServer) {
 			});
 		};
 
-		endSeries = (err) => {
+		const endSeries = (err) => {
 			if (err != null) {
 				reject (err);
 				return;
 			}
 			resolve (result);
 		};
+
+		Async.eachSeries (dirpaths, readDirectory, endSeries);
 	}));
 };
 
 // Return a promise that finds the path for the cache image specified by the provided GetCaptureImage command, resolving with a non-empty path value if successful, or an empty path value for a file not found result
 TimelapseCaptureIntent.getCaptureImagePath = function (cmdInv, cameraServer) {
 	return (new Promise ((resolve, reject) => {
-		let dirtime, dirpath;
+		let dirtime;
 
 		dirtime = 0;
-		for (let t of cameraServer.captureDirectoryTimes) {
+		for (const t of cameraServer.captureDirectoryTimes) {
 			if (t > cmdInv.params.imageTime) {
 				break;
 			}
@@ -691,7 +696,7 @@ TimelapseCaptureIntent.getCaptureImagePath = function (cmdInv, cameraServer) {
 			return;
 		}
 
-		dirpath = Path.join (cameraServer.cacheDataPath, "" + dirtime);
+		const dirpath = Path.join (cameraServer.cacheDataPath, `${dirtime}`);
 		FsUtil.readDirectory (dirpath, (err, files) => {
 			let result;
 
@@ -701,8 +706,8 @@ TimelapseCaptureIntent.getCaptureImagePath = function (cmdInv, cameraServer) {
 			}
 
 			result = "";
-			for (let file of files) {
-				if (file.indexOf ("" + cmdInv.params.imageTime) === 0) {
+			for (const file of files) {
+				if (file.indexOf (`${cmdInv.params.imageTime}`) === 0) {
 					result = Path.join (dirpath, file);
 					break;
 				}
@@ -712,5 +717,4 @@ TimelapseCaptureIntent.getCaptureImagePath = function (cmdInv, cameraServer) {
 		});
 	}));
 };
-
 module.exports = TimelapseCaptureIntent;

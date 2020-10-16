@@ -1,6 +1,5 @@
 /*
-* Copyright 2019 Membrane Software <author@membranesoftware.com>
-*                 https://membranesoftware.com
+* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -34,12 +33,18 @@
 
 const App = global.App || { };
 const ChildProcess = require ("child_process");
-const Log = require (App.SOURCE_DIRECTORY + "/Log");
+const Path = require ("path");
+const Log = require (Path.join (App.SOURCE_DIRECTORY, "Log"));
 
-const STOP_SIGNAL_REPEAT_DELAY = 4800; // milliseconds
+const StopSignalRepeatDelay = 4800; // milliseconds
 
 class ExecProcess {
-	// execPath is the path to the binary to run, execArgs is an array containing command line arguments for the child process, envParams is an object containing environment variables for the child process, workingPath is the path to the working directory for process execution (defaults to the application data directory if empty), dataCallback is a function that should be called each time a set of lines is parsed (invoked with an array of strings and a callback), and endCallback is a function that should be called when the process ends (invoked with err and isExitSuccess parameters).
+	// execPath: the path to the binary to run
+	// execArgs: an array containing command line arguments for the child process
+	// envParams: an object containing environment variables for the child process
+	// workingPath: the path to the working directory for process execution (defaults to the application data directory if empty)
+	// dataCallback: a function that should be called each time a set of lines is parsed (invoked with an array of strings and a callback)
+	// endCallback: a function that should be called when the process ends (invoked with err and isExitSuccess parameters).
 	constructor (execPath, execArgs, envParams, workingPath, dataCallback, endCallback) {
 		// Read-only data members
 		this.isPaused = false;
@@ -50,7 +55,7 @@ class ExecProcess {
 
 		this.execPath = execPath;
 		if (this.execPath.indexOf ("/") !== 0) {
-			this.execPath = App.BIN_DIRECTORY + "/" + this.execPath;
+			this.execPath = Path.join (App.BIN_DIRECTORY, this.execPath);
 		}
 
 		this.workingPath = workingPath;
@@ -68,6 +73,9 @@ class ExecProcess {
 		}
 		this.execArgs = execArgs;
 
+		this.isDrainingStdin = false;
+		this.stdinWriteData = "";
+
 		this.dataCallback = dataCallback;
 		this.endCallback = endCallback;
 		this.process = null;
@@ -76,7 +84,7 @@ class ExecProcess {
 
 	// Run the configured process
 	runProcess () {
-		let proc, endcount, ended, endRun;
+		let proc, endcount;
 
 		try {
 			proc = ChildProcess.spawn (this.execPath, this.execArgs, {
@@ -97,6 +105,8 @@ class ExecProcess {
 		this.process = proc;
 		endcount = 0;
 		this.isEnded = false;
+		this.isDrainingStdin = false;
+		this.stdinWriteData = "";
 		this.exitCode = -1;
 		this.exitSignal = "";
 		this.isExitSuccess = false;
@@ -146,10 +156,11 @@ class ExecProcess {
 			}
 		});
 
-		endRun = (err) => {
+		const endRun = (err) => {
 			if (this.isEnded) {
 				return;
 			}
+
 			this.isEnded = true;
 			if (err != null) {
 				if (this.endCallback != null) {
@@ -187,11 +198,37 @@ class ExecProcess {
 		this.isPaused = false;
 	}
 
+	// Write the provided data to the process's stdin
+	write (data) {
+		const proc = this.process;
+		if (proc == null) {
+			return;
+		}
+
+		if (this.isDrainingStdin) {
+			this.stdinWriteData += data.toString ();
+			return;
+		}
+
+		if (! proc.stdin.write (data)) {
+			this.isDrainingStdin = true;
+			this.stdinWriteData = "";
+			proc.stdin.once ("drain", () => {
+				const writedata = this.stdinWriteData;
+				this.isDrainingStdin = false;
+				this.stdinWriteData = "";
+				if (writedata.length > 0) {
+					this.write (writedata);
+				}
+			});
+		}
+	}
+
 	// Parse any data contained in process buffers
 	parseBuffer () {
-		let pos, line, lines, endParse;
+		let pos, line;
 
-		endParse = () => {
+		const endParse = () => {
 			if (this.isPaused) {
 				this.resumeEvents ();
 			}
@@ -204,7 +241,7 @@ class ExecProcess {
 			}
 		};
 
-		lines = [ ];
+		const lines = [ ];
 		while (true) {
 			pos = this.stdoutBuffer.indexOf ("\n");
 			if (pos < 0) {
@@ -249,22 +286,19 @@ class ExecProcess {
 
 	// Stop the process
 	stop () {
-		let pid, repeatKill;
-
 		if (this.isEnded) {
 			return;
 		}
 
-		pid = this.process.pid;
 		this.process.kill ("SIGTERM");
-		repeatKill = () => {
+		const repeatKill = () => {
 			if (this.isEnded) {
 				return;
 			}
+
 			this.process.kill ("SIGKILL");
 		};
-		setTimeout (repeatKill, STOP_SIGNAL_REPEAT_DELAY);
+		setTimeout (repeatKill, StopSignalRepeatDelay);
 	}
 }
-
 module.exports = ExecProcess;

@@ -1,6 +1,5 @@
 /*
-* Copyright 2019 Membrane Software <author@membranesoftware.com>
-*                 https://membranesoftware.com
+* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -32,9 +31,9 @@
 
 "use strict";
 
-exports.SUCCESS = 0;
-exports.ERROR_INVALID_PARAMS = -1;
-exports.ERROR_ALREADY_STARTED = -2;
-exports.ERROR_NOT_FOUND = -3;
-exports.ERROR_UNKNOWN_TYPE = -4;
-exports.ERROR_NOT_CONNECTED = -5;
+exports.Success = 0;
+exports.InvalidParamsError = -1;
+exports.AlreadyStartedError = -2;
+exports.NotFoundError = -3;
+exports.UnknownTypeError = -4;
+exports.NotConnectedError = -5;

@@ -1,6 +1,5 @@
 /*
-* Copyright 2019 Membrane Software <author@membranesoftware.com>
-*                 https://membranesoftware.com
+* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -32,19 +31,19 @@
 
 const App = global.App || { };
 const Path = require ("path");
-const Fs = require ("fs");
-const Result = require (App.SOURCE_DIRECTORY + "/Result");
-const Log = require (App.SOURCE_DIRECTORY + "/Log");
-const SystemInterface = require (App.SOURCE_DIRECTORY + "/SystemInterface");
-const FsUtil = require (App.SOURCE_DIRECTORY + "/FsUtil");
-const RepeatTask = require (App.SOURCE_DIRECTORY + "/RepeatTask");
-const Intent = require (App.SOURCE_DIRECTORY + "/Intent/Intent");
-const Task = require (App.SOURCE_DIRECTORY + "/Task/Task");
-const TimelapseCaptureIntent = require (App.SOURCE_DIRECTORY + "/Intent/types/TimelapseCaptureIntent");
-const ServerBase = require (App.SOURCE_DIRECTORY + "/Server/ServerBase");
+const Net = require ("net");
+const Log = require (Path.join (App.SOURCE_DIRECTORY, "Log"));
+const SystemInterface = require (Path.join (App.SOURCE_DIRECTORY, "SystemInterface"));
+const FsUtil = require (Path.join (App.SOURCE_DIRECTORY, "FsUtil"));
+const RepeatTask = require (Path.join (App.SOURCE_DIRECTORY, "RepeatTask"));
+const Intent = require (Path.join (App.SOURCE_DIRECTORY, "Intent", "Intent"));
+const Task = require (Path.join (App.SOURCE_DIRECTORY, "Task", "Task"));
+const TimelapseCaptureIntent = require (Path.join (App.SOURCE_DIRECTORY, "Intent", "types", "TimelapseCaptureIntent"));
+const ServerBase = require (Path.join (App.SOURCE_DIRECTORY, "Server", "ServerBase"));
 
-const CAPTURE_IMAGE_PATH = "/camera/image.jpg";
-const GET_DISK_SPACE_PERIOD = 7 * 60 * 1000; // milliseconds
+const RaspividProcessName = "/usr/bin/raspivid";
+const KillallProcessName = "/usr/bin/killall";
+const GetDiskSpacePeriod = 7 * 60 * 1000; // milliseconds
 
 class CameraServer extends ServerBase {
 	constructor () {
@@ -52,15 +51,17 @@ class CameraServer extends ServerBase {
 		this.name = "CameraServer";
 		this.description = "Accept and execute commands to control a camera device";
 
-		this.configureParams = [
-		];
+		this.configureParams = [ ];
 
 		this.isReady = false;
 		this.totalStorage = 0; // bytes
 		this.freeStorage = 0; // bytes
 		this.usedStorage = 0; // bytes
 		this.getDiskSpaceTask = new RepeatTask ();
-		this.cacheDataPath = Path.join (App.DATA_DIRECTORY, App.CAMERA_CACHE_PATH);
+		this.cacheDataPath = Path.join (App.DATA_DIRECTORY, App.CameraCachePath);
+		this.captureImagePath = "/cam/a.jpg";
+		this.isCapturingVideo = false;
+		this.videoMonitor = "";
 
 		this.clearCacheMetadata ();
 	}
@@ -75,7 +76,7 @@ class CameraServer extends ServerBase {
 		this.lastCaptureHeight = 0;
 	}
 
-	// Start the server's operation and invoke the provided callback when complete, with an "err" parameter (non-null if an error occurred)
+	// Start the server's operation and invoke startCallback (err) when complete
 	doStart (startCallback) {
 		FsUtil.createDirectory (this.cacheDataPath).then (() => {
 			return (Task.executeTask ("GetDiskSpace", { targetPath: this.cacheDataPath }));
@@ -102,76 +103,104 @@ class CameraServer extends ServerBase {
 				}).catch ((err) => {
 					callback ();
 				});
-			}, GET_DISK_SPACE_PERIOD);
+			}, GetDiskSpacePeriod);
 
-			App.systemAgent.addInvokeRequestHandler ("/", SystemInterface.Constant.Camera, (cmdInv) => {
+			App.systemAgent.addInvokeRequestHandler (SystemInterface.Constant.DefaultInvokePath, SystemInterface.Constant.Camera, (cmdInv, request, response) => {
 				switch (cmdInv.command) {
+					case SystemInterface.CommandId.ConfigureCamera: {
+						this.configureCamera (cmdInv, request, response);
+						break;
+					}
 					case SystemInterface.CommandId.CreateTimelapseCaptureIntent: {
-						return (this.createTimelapseCaptureIntent (cmdInv));
+						this.createTimelapseCaptureIntent (cmdInv, request, response);
+						break;
 					}
 					case SystemInterface.CommandId.StopCapture: {
-						return (this.stopCapture (cmdInv));
+						this.stopCapture (cmdInv, request, response);
+						break;
 					}
 					case SystemInterface.CommandId.ClearTimelapse: {
-						return (this.clearTimelapse (cmdInv));
+						this.clearTimelapse (cmdInv, request, response);
+						break;
+					}
+					case SystemInterface.CommandId.GetCameraStream: {
+						this.getCameraStream (cmdInv, request, response);
+						break;
+					}
+					default: {
+						App.systemAgent.writeResponse (request, response, 400);
+						break;
 					}
 				}
 			});
 
-			App.systemAgent.addSecondaryRequestHandler (CAPTURE_IMAGE_PATH, (cmdInv, request, response) => {
+			this.captureImagePath = `/cam/${App.systemAgent.getRandomString (App.systemAgent.getRandomInteger (32, 48))}.jpg`;
+			Log.debug (`Camera capture image path set: ${this.captureImagePath}`);
+			App.systemAgent.addSecondaryRequestHandler (this.captureImagePath, (cmdInv, request, response) => {
 				switch (cmdInv.command) {
 					case SystemInterface.CommandId.GetCaptureImage: {
 						this.getCaptureImage (cmdInv, request, response);
 						break;
 					}
 					default: {
-						App.systemAgent.endRequest (request, response, 400, "Bad request");
+						App.systemAgent.writeResponse (request, response, 400);
 						break;
 					}
 				}
 			});
 
-			App.systemAgent.addLinkCommandHandler (SystemInterface.Constant.Camera, (client, cmdInv) => {
+			App.systemAgent.addLinkCommandHandler (SystemInterface.Constant.Camera, (cmdInv, client) => {
 				switch (cmdInv.command) {
 					case SystemInterface.CommandId.FindCaptureImages: {
-						this.findCaptureImages (client, cmdInv);
+						this.findCaptureImages (cmdInv, client);
 						break;
 					}
 				}
 			});
 
 			this.isReady = true;
+			App.systemAgent.getApplicationNews ();
 			startCallback ();
 		}).catch ((err) => {
 			startCallback (err);
 		});
 	}
 
-	// Return a command invocation containing the server's status
-	doGetStatus () {
-		let params, intent;
+	// Execute subclass-specific stop operations and invoke stopCallback when complete
+	doStop (stopCallback) {
+		this.getDiskSpaceTask.stop ();
+		App.systemAgent.runProcess (KillallProcessName, [
+			"-q", "raspivid"
+		]).catch ((err) => {
+			Log.err (`${this.toString ()} error stopping raspivid process; err=${err}`);
+		}).then (() => {
+			stopCallback ();
+		});
+	}
 
-		params = {
+	// Return a command containing the server's status
+	doGetStatus () {
+		const params = {
 			isReady: this.isReady,
 			freeStorage: this.freeStorage,
 			totalStorage: this.totalStorage,
-			captureImagePath: CAPTURE_IMAGE_PATH,
+			captureImagePath: this.captureImagePath,
 			minCaptureTime: this.minCaptureTime,
 			lastCaptureTime: this.lastCaptureTime,
 			lastCaptureWidth: this.lastCaptureWidth,
-			lastCaptureHeight: this.lastCaptureHeight
+			lastCaptureHeight: this.lastCaptureHeight,
+			isCapturing: false,
+			capturePeriod: 0
 		};
 
-		intent = this.getTimelapseCaptureIntent ();
-		if (intent == null) {
-			params.isCapturing = false;
-			params.capturePeriod = 0;
-			params.imageProfile = 0;
-		}
-		else {
+		if (this.getTimelapseCaptureIntent () != null) {
 			params.isCapturing = true;
-			params.capturePeriod = intent.state.capturePeriod;
-			params.imageProfile = intent.state.imageProfile;
+			params.capturePeriod = this.getCameraConfigurationValue ("capturePeriod", 0);
+		}
+		params.imageProfile = this.getCameraConfigurationValue ("imageProfile", 0);
+		params.flip = this.getCameraConfigurationValue ("flip", 0);
+		if (this.videoMonitor.length > 0) {
+			params.videoMonitor = this.videoMonitor;
 		}
 
 		return (this.createCommand ("CameraServerStatus", SystemInterface.Constant.Camera, params));
@@ -179,9 +208,7 @@ class CameraServer extends ServerBase {
 
 	// Return the active TimelapseCaptureIntent object, or null if no such object was found
 	getTimelapseCaptureIntent () {
-		let intents;
-
-		intents = App.systemAgent.findIntents (this.name, true);
+		const intents = App.systemAgent.findIntents (this.name, true);
 		if (intents.length <= 0) {
 			return (null);
 		}
@@ -189,15 +216,51 @@ class CameraServer extends ServerBase {
 		return (intents[0]);
 	}
 
-	// Start an intent to capture timelapse images and return a CommandResult command
-	createTimelapseCaptureIntent (cmdInv) {
-		let intent, params;
+	// Return the named value from App.systemAgent.runState.cameraConfiguration, or defaultValue if no such value was found
+	getCameraConfigurationValue (key, defaultValue) {
+		if ((App.systemAgent.runState.cameraConfiguration == null) || (App.systemAgent.runState.cameraConfiguration[key] === undefined)) {
+			return (defaultValue);
+		}
+		return (App.systemAgent.runState.cameraConfiguration[key]);
+	}
 
-		params = {
+	// Configure camera operations and start or stop a TimelapseCaptureIntent if needed
+	configureCamera (cmdInv, request, response) {
+		App.systemAgent.updateRunState ({
+			cameraConfiguration: cmdInv.params
+		});
+
+		const params = {
 			success: false,
 			error: ""
 		};
-		intent = Intent.createIntent ("TimelapseCaptureIntent", cmdInv.params);
+		if (cmdInv.params.isCaptureEnabled) {
+			const intent = Intent.createIntent ("TimelapseCaptureIntent", {
+				capturePeriod: cmdInv.params.capturePeriod
+			});
+			if (intent == null) {
+				params.error = "Internal server error";
+			}
+			else {
+				App.systemAgent.removeIntentGroup (this.name);
+				App.systemAgent.runIntent (intent, this.name);
+				params.success = true;
+			}
+		}
+		else {
+			App.systemAgent.removeIntentGroup (this.name);
+			params.success = true;
+		}
+		App.systemAgent.writeCommandResponse (request, response, this.createCommand ("CommandResult", SystemInterface.Constant.Camera, params));
+	}
+
+	// Start a new TimelapseCaptureIntent, replacing any existing one
+	createTimelapseCaptureIntent (cmdInv, request, response) {
+		const params = {
+			success: false,
+			error: ""
+		};
+		const intent = Intent.createIntent ("TimelapseCaptureIntent", cmdInv.params);
 		if (intent == null) {
 			params.error = "Internal server error";
 		}
@@ -207,22 +270,20 @@ class CameraServer extends ServerBase {
 			params.success = true;
 		}
 
-		return (this.createCommand ("CommandResult", SystemInterface.Constant.Camera, params));
+		App.systemAgent.writeCommandResponse (request, response, this.createCommand ("CommandResult", SystemInterface.Constant.Camera, params));
 	}
 
-	// Remove any active timelapse capture intent and return a CommandResult command
-	stopCapture (cmdInv) {
+	// Stop any running capture intent
+	stopCapture (cmdInv, request, response) {
 		App.systemAgent.removeIntentGroup (this.name);
-		return (this.createCommand ("CommandResult", SystemInterface.Constant.Camera, {
+		App.systemAgent.writeCommandResponse (request, response, this.createCommand ("CommandResult", SystemInterface.Constant.Camera, {
 			success: true
 		}));
 	}
 
-	// Remove any active timelapse capture intent, delete all stored cache images, and return a CommandResult command
-	clearTimelapse (cmdInv) {
-		let intent, doClear;
-
-		doClear = () => {
+	// Stop any running capture intent and delete all stored cache data
+	clearTimelapse (cmdInv, request, response) {
+		const doClear = () => {
 			Log.debug (`${this.toString ()} clear cache directory by command; path=${this.cacheDataPath}`);
 			this.clearCacheMetadata ();
 
@@ -244,7 +305,7 @@ class CameraServer extends ServerBase {
 		};
 
 		this.clearCacheMetadata ();
-		intent = this.getTimelapseCaptureIntent ();
+		const intent = this.getTimelapseCaptureIntent ();
 		if (intent != null) {
 			App.systemAgent.removeIntentGroup (this.name);
 			intent.onCaptureIdle (doClear);
@@ -253,94 +314,166 @@ class CameraServer extends ServerBase {
 			doClear ();
 		}
 
-		return (this.createCommand ("CommandResult", SystemInterface.Constant.Camera, {
+		App.systemAgent.writeCommandResponse (request, response, this.createCommand ("CommandResult", SystemInterface.Constant.Camera, {
 			success: true
 		}));
 	}
 
-	// Handle a request with a GetCaptureImage command
-	getCaptureImage (cmdInv, request, response) {
-		let path, writeImageFile;
+	// Make live camera video available for playback and respond with a GetCameraStreamResult command
+	getCameraStream (cmdInv, request, response) {
+		let started;
 
-		writeImageFile = (path) => {
-			Fs.stat (path, (err, stats) => {
-				let stream, isopen;
+		if (App.systemAgent.urlHostname.length <= 0) {
+			App.systemAgent.writeCommandResponse (request, response, this.createCommand ("CommandResult", SystemInterface.Constant.Camera, {
+				success: false
+			}));
+			return;
+		}
 
-				if (err != null) {
-					Log.err (`${this.toString ()} error reading capture image file; path=${path} err=${err}`);
-					response.statusCode = 404;
-					response.end ();
-					return;
-				}
+		const server = new Net.Server ({ });
+		server.listen ({
+			port: 0
+		}, (err) => {
+			if (err != null) {
+				server.close ();
+				Log.err (`${this.toString ()} error starting camera stream; err=${err}`);
+				App.systemAgent.writeCommandResponse (request, response, this.createCommand ("CommandResult", SystemInterface.Constant.Camera, {
+					success: false
+				}));
+				return;
+			}
 
-				if (! stats.isFile ()) {
-					Log.err (`${this.toString ()} error reading capture image file; path=${path} err=Not a regular file`);
-					response.statusCode = 404;
-					response.end ();
-					return;
-				}
+			const port = server.address ().port;
+			server.close ();
+			if ((typeof port != "number") || (port <= 0)) {
+				Log.err (`${this.toString ()} error starting camera stream; err=Unable to determine listen port, ${port}`);
+				App.systemAgent.writeCommandResponse (request, response, this.createCommand ("CommandResult", SystemInterface.Constant.Camera, {
+					success: false
+				}));
+				return;
+			}
 
-				isopen = false;
-				stream = Fs.createReadStream (path, { });
-				stream.on ("error", (err) => {
-					Log.err (`${this.toString ()} error reading capture image file; path=${path} err=${err}`);
-					if (! isopen) {
-						response.statusCode = 500;
-						response.end ();
-					}
-				});
-
-				stream.on ("open", () => {
-					if (isopen) {
+			this.isCapturingVideo = true;
+			started = false;
+			App.systemAgent.runProcess (KillallProcessName, [
+				"-q", "raspivid"
+			]).catch ((err) => {
+				Log.err (`${this.toString ()} error stopping raspivid process; err=${err}`);
+			}).then (() => {
+				return (new Promise ((resolve, reject) => {
+					const intent = this.getTimelapseCaptureIntent ();
+					if (intent == null) {
+						resolve ();
 						return;
 					}
-
-					isopen = true;
-					response.statusCode = 200;
-					response.setHeader ("Content-Type", "image/jpeg");
-					response.setHeader ("Content-Length", stats.size);
-					stream.pipe (response);
-					stream.on ("finish", () => {
-						response.end ();
+					intent.onCaptureIdle (() => {
+						resolve ();
 					});
+				}));
+			}).then (() => {
+				const dataCallback = (lines, lineCallback) => {
+					if (! started) {
+						started = true;
+						if (cmdInv.params.monitorName.length > 0) {
+							this.videoMonitor = cmdInv.params.monitorName;
+						}
+						else {
+							this.videoMonitor = App.uiText.getText ("DefaultVideoMonitorName");
+						}
 
-					response.socket.setMaxListeners (0);
-					response.socket.once ("error", (err) => {
-						stream.close ();
-					});
-				});
+						App.systemAgent.writeCommandResponse (request, response, this.createCommand ("GetCameraStreamResult", SystemInterface.Constant.Camera, {
+							streamUrl: `tcp:${App.DoubleSlash}${App.systemAgent.urlHostname}:${port}`
+						}));
+					}
+					process.nextTick (lineCallback);
+				};
+
+				const args = [
+					"-n",
+					"-v",
+					"-t", "0",
+					"-l",
+					"-o", `tcp:${App.DoubleSlash}0.0.0.0:${port}`
+				];
+				const flip = this.getCameraConfigurationValue ("flip", SystemInterface.Constant.NoFlip);
+				switch (flip) {
+					case SystemInterface.Constant.HorizontalFlip: {
+						args.push ("-hf");
+						break;
+					}
+					case SystemInterface.Constant.VerticalFlip: {
+						args.push ("-vf");
+						break;
+					}
+					case SystemInterface.Constant.HorizontalAndVerticalFlip: {
+						args.push ("-hf");
+						args.push ("-vf");
+						break;
+					}
+				}
+
+				const streamprofile = this.getCameraConfigurationValue ("streamProfile", SystemInterface.Constant.DefaultStreamProfile);
+				switch (streamprofile) {
+					case SystemInterface.Constant.LowQualityStreamProfile: {
+						args.push ("-w", "1280");
+						args.push ("-h", "720");
+						break;
+					}
+					case SystemInterface.Constant.LowestQualityStreamProfile: {
+						args.push ("-w", "640");
+						args.push ("-h", "480");
+						break;
+					}
+				}
+
+				return (App.systemAgent.runProcess (RaspividProcessName, args, { }, "", dataCallback));
+			}).then ((isExitSuccess) => {
+				Log.debug (`${this.toString ()} raspivid process exit; isExitSuccess=${isExitSuccess}`);
+				this.videoMonitor = "";
+				this.isCapturingVideo = false;
+				if (! started) {
+					App.systemAgent.writeCommandResponse (request, response, this.createCommand ("CommandResult", SystemInterface.Constant.Camera, {
+						success: false
+					}));
+				}
+			}).catch ((err) => {
+				Log.err (`${this.toString ()} error starting camera stream; err=${err}`);
+				this.videoMonitor = "";
+				this.isCapturingVideo = false;
+				App.systemAgent.writeCommandResponse (request, response, this.createCommand ("CommandResult", SystemInterface.Constant.Camera, {
+					success: false
+				}));
 			});
-		};
+		});
+	}
 
-		path = "";
+	// Provide a requested image from cached data
+	getCaptureImage (cmdInv, request, response) {
 		if (cmdInv.params.imageTime <= 0) {
-			path = this.lastCaptureFile;
-			if (path == "") {
-				response.statusCode = 404;
-				response.end ();
+			if (this.lastCaptureFile == "") {
+				App.systemAgent.writeResponse (request, response, 404);
 			}
 			else {
-				writeImageFile (path);
+				App.systemAgent.writeFileResponse (request, response, this.lastCaptureFile, "image/jpeg");
 			}
 			return;
 		}
 
 		TimelapseCaptureIntent.getCaptureImagePath (cmdInv, this).then ((path) => {
 			if (path == "") {
-				response.statusCode = 404;
-				response.end ();
+				App.systemAgent.writeResponse (request, response, 404);
 			}
 			else {
-				writeImageFile (path);
+				App.systemAgent.writeFileResponse (request, response, path, "image/jpeg");
 			}
 		}).catch ((err) => {
 			Log.err (`${this.toString ()} Failed to get capture image; err=${err}`);
-			response.statusCode = 500;
-			response.end ();
+			App.systemAgent.writeResponse (request, response, 500);
 		});
 	}
 
-	findCaptureImages (client, cmdInv) {
+	// Find cached images in a specified range
+	findCaptureImages (cmdInv, client) {
 		TimelapseCaptureIntent.findCaptureImages (cmdInv, this).then ((resultObject) => {
 			client.emit (SystemInterface.Constant.WebSocketEvent, this.createCommand ("FindCaptureImagesResult", SystemInterface.Constant.Camera, resultObject));
 		}).catch ((err) => {
@@ -348,5 +481,4 @@ class CameraServer extends ServerBase {
 		});
 	}
 }
-
 module.exports = CameraServer;

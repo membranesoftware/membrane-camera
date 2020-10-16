@@ -1,6 +1,5 @@
 /*
-* Copyright 2019 Membrane Software <author@membranesoftware.com>
-*                 https://membranesoftware.com
+* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -30,21 +29,21 @@
 */
 // Export all files found in this directory
 
-const Fs = require ('fs');
+"use strict";
 
-var files, i, path, m;
+const Fs = require ("fs");
 
-files = Fs.readdirSync (__dirname);
-for (i = 0; i < files.length; ++i) {
-	path = files[i];
-	if (path == 'index.js') {
+const files = Fs.readdirSync (__dirname);
+for (let i = 0; i < files.length; ++i) {
+	const path = files[i];
+	if (path == "index.js") {
 		continue;
 	}
 
-	m = path.match (/^(.*)\.js$/);
+	const m = path.match (/^(.*)\.js$/);
 	if (m == null) {
 		continue;
 	}
 
-	exports[m[1]] = require ('./' + path);
+	exports[m[1]] = require (`./${path}`);
 }

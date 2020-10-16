@@ -1,6 +1,5 @@
 /*
-* Copyright 2019 Membrane Software <author@membranesoftware.com>
-*                 https://membranesoftware.com
+* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -33,9 +32,9 @@
 "use strict";
 
 const App = global.App || { };
-const Result = require (App.SOURCE_DIRECTORY + "/Result");
-const Log = require (App.SOURCE_DIRECTORY + "/Log");
-const SystemInterface = require (App.SOURCE_DIRECTORY + "/SystemInterface");
+const Path = require ("path");
+const Log = require (Path.join (App.SOURCE_DIRECTORY, "Log"));
+const SystemInterface = require (Path.join (App.SOURCE_DIRECTORY, "SystemInterface"));
 
 class ServerBase {
 	constructor () {
@@ -71,9 +70,9 @@ class ServerBase {
 	toString () {
 		let s;
 
-		s = "<" + this.name;
+		s = `<${this.name}`;
 		if (Object.keys (this.statusMap).length > 0) {
-			s += " " + JSON.stringify (this.statusMap);
+			s += ` ${JSON.stringify (this.statusMap)}`;
 		}
 		s += ">";
 
@@ -82,23 +81,21 @@ class ServerBase {
 
 	// Return the AgentConfiguration field name that holds configuration values for servers of this type
 	getAgentConfigurationKey () {
-		return (this.name.substring (0, 1).toLowerCase () + this.name.substring (1) + "Configuration");
+		return (`${this.name.substring (0, 1).toLowerCase ()}${this.name.substring (1)}Configuration`);
 	}
 
 	// Return the AgentStatus field name that holds status values for servers of this type
 	getAgentStatusKey () {
-		return (this.name.substring (0, 1).toLowerCase () + this.name.substring (1) + "Status");
+		return (`${this.name.substring (0, 1).toLowerCase ()}${this.name.substring (1)}Status`);
 	}
 
 	// Configure the server using values in the provided params object and set the isConfigured data member to reflect whether the configuration was successful
 	configure (configParams) {
-		let fields;
-
 		if ((typeof configParams != "object") || (configParams == null)) {
 			configParams = { };
 		}
 
-		fields = this.parseConfiguration (configParams);
+		const fields = this.parseConfiguration (configParams);
 		if (SystemInterface.isError (fields)) {
 			Log.err (`${this.toString ()} configuration parse error; err=${fields}`);
 			return;
@@ -110,21 +107,19 @@ class ServerBase {
 		this.doConfigure ();
 	}
 
-	// Subclass method. Implementations should execute actions appropriate when the server has been successfully configured
+	// Execute subclass-specific actions appropriate when the server has been successfully configured
 	doConfigure () {
 		// Default implementation does nothing
 	}
 
 	// Return an object containing configuration fields parsed from the server's base configuration combined with the provided parameters, or an error message if the parse failed
 	parseConfiguration (configParams) {
-		let c;
-
-		c = { };
-		for (let i in this.baseConfiguration) {
+		const c = { };
+		for (const i in this.baseConfiguration) {
 			c[i] = this.baseConfiguration[i];
 		}
 		if ((typeof configParams == "object") && (configParams != null)) {
-			for (let i in configParams) {
+			for (const i in configParams) {
 				c[i] = configParams[i];
 			}
 		}
@@ -189,9 +184,7 @@ class ServerBase {
 
 	// Set a server status field in the provided AgentStatus params object
 	setStatus (fields) {
-		let cmd, fieldname;
-
-		cmd = this.getStatus ();
+		const cmd = this.getStatus ();
 		if (cmd == null) {
 			return;
 		}
@@ -199,15 +192,28 @@ class ServerBase {
 		fields[this.getAgentStatusKey ()] = cmd.params;
 	}
 
+	// Return a boolean value indicating if the provided AgentStatus command contains a server status change
+	findStatusChange (agentStatus) {
+		if (! this.isRunning) {
+			return (false);
+		}
+
+		return (this.doFindStatusChange (agentStatus));
+	}
+
+	// Return a boolean value indicating if the provided AgentStatus command contains a subclass-specific server status change
+	doFindStatusChange (agentStatus) {
+		// Default implementation returns false
+		return (false);
+	}
+
 	// Provide server configuration data by adding an appropriate field to an AgentConfiguration params object
 	getConfiguration (agentConfiguration) {
-		let c;
-
-		c = { };
-		for (let i in this.baseConfiguration) {
+		const c = { };
+		for (const i in this.baseConfiguration) {
 			c[i] = this.baseConfiguration[i];
 		}
-		for (let i in this.deltaConfiguration) {
+		for (const i in this.deltaConfiguration) {
 			c[i] = this.deltaConfiguration[i];
 		}
 		this.doGetConfiguration (c);
@@ -221,9 +227,7 @@ class ServerBase {
 
 	// Return an object containing a command with the default agent prefix and the provided parameters, or null if the command could not be validated, in which case an error log message is generated
 	createCommand (commandName, commandType, commandParams) {
-		let cmd;
-
-		cmd = SystemInterface.createCommand (App.systemAgent.getCommandPrefix (), commandName, commandType, commandParams);
+		const cmd = SystemInterface.createCommand (App.systemAgent.getCommandPrefix (), commandName, commandType, commandParams);
 		if (SystemInterface.isError (cmd)) {
 			Log.err (`${this.toString ()} failed to create command invocation; commandName=${commandName} err=${cmd}`);
 			return (null);
@@ -232,5 +236,4 @@ class ServerBase {
 		return (cmd);
 	}
 }
-
 module.exports = ServerBase;

@@ -1,6 +1,5 @@
 /*
-* Copyright 2019 Membrane Software <author@membranesoftware.com>
-*                 https://membranesoftware.com
+* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -28,24 +27,8 @@
 * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 * POSSIBILITY OF SUCH DAMAGE.
 */
-// Utility functions for manipulating maps
-
 "use strict";
 
-const App = global.App || { };
-
-// Return an item from the map, or null if the item wasn't found. If createFn is a function that returns an object, a new item is created instead.
-function getItem (map, key, createFn) {
-	var item;
-
-	item = map[key];
-	if (item == null) {
-		if (typeof createFn == 'function') {
-			item = createFn ();
-			map[key] = item;
-		}
-	}
-
-	return (item);
-}
-exports.getItem = getItem;
+exports.AppStartMessage = "is supported by donations from users like you. If you get utility and enjoyment from this application, please think about contributing money to support its development. Any amount helps! mbrn.tech/contribute";
+exports.GetDiskSpaceTaskName = "Update storage space available";
+exports.DefaultVideoMonitorName = "Membrane Monitor";

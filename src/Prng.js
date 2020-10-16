@@ -27,48 +27,24 @@
 * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 * POSSIBILITY OF SUCH DAMAGE.
 */
-// Intent subclasses and utility functions
+// Class that generates pseudo-random numbers
 
 "use strict";
 
-const App = global.App || { };
-const Path = require ("path");
-const Result = require (Path.join (App.SOURCE_DIRECTORY, "Result"));
-const SystemInterface = require (Path.join (App.SOURCE_DIRECTORY, "SystemInterface"));
-const IntentTypes = require ("./types");
-
-exports.IntentTypes = IntentTypes;
-
-// Return a newly created intent of the specified type name and configure it with the provided object. Returns null if the intent could not be created, indicating that the type name was not found or the configuration was not valid.
-exports.createIntent = (typeName, configureParams) => {
-	const type = IntentTypes[typeName];
-	if (type == null) {
-		return (null);
+class Prng {
+	constructor () {
 	}
 
-	const intent = new type ();
-	if ((typeof configureParams != "object") || (configureParams == null)) {
-		configureParams = { };
-	}
-	if (intent.configure (configureParams) != Result.Success) {
-		return (null);
-	}
-
-	return (intent);
-};
-
-// Return a newly created intent, as constructed with the provided command, or null if the intent could not be created.
-exports.createIntentFromCommand = (command) => {
-	const cmd = SystemInterface.parseCommand (command);
-	if (SystemInterface.isError (cmd)) {
-		return (null);
-	}
-
-	for (const type of Object.values (IntentTypes)) {
-		const intent = new type ();
-		if (intent.configureFromCommand (cmd) == Result.Success) {
-			return (intent);
+	// Return a randomly selected integer within the provided inclusive range
+	getRandomInteger (min, max) {
+		// TODO: Provide capability for instances of this class to store a seed value (currently using the system seed for all instances)
+		min = Math.floor (min);
+		max = Math.floor (max);
+		const diff = max - min;
+		if (diff <= 0) {
+			return (Math.floor (min));
 		}
+		return (Math.floor (min + (Math.random () * (diff + 1))));
 	}
-	return (null);
-};
+}
+module.exports = Prng;

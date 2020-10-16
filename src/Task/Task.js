@@ -1,6 +1,5 @@
 /*
-* Copyright 2019 Membrane Software <author@membranesoftware.com>
-*                 https://membranesoftware.com
+* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -28,49 +27,39 @@
 * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 * POSSIBILITY OF SUCH DAMAGE.
 */
-// Utility functions for Task objects
+// Task subclasses and utility functions
 
 "use strict";
 
 const App = global.App || { };
-const Result = require (App.SOURCE_DIRECTORY + "/Result");
-const TaskTypes = require ('./types');
+const Path = require ("path");
+const Result = require (Path.join (App.SOURCE_DIRECTORY, "Result"));
+const TaskTypes = require ("./types");
 
-function Task () {
-
-}
-
-module.exports = Task;
-
-Task.TaskTypes = TaskTypes;
 exports.TaskTypes = TaskTypes;
 
-// createTask - Create a new task of the specified type name and configure it with the provided parameters object. Returns null if the task could not be created, indicating that the type name was not found or the configuration was not valid.
-Task.createTask = function (typeName, configureParams) {
-	let tasktype, task;
-
-	tasktype = Task.TaskTypes[typeName];
+// Create a new task of the specified type name and configure it with the provided parameters object. Returns null if the task could not be created, indicating that the type name was not found or the configuration was not valid.
+exports.createTask = (typeName, configureParams) => {
+	const tasktype = TaskTypes[typeName];
 	if (tasktype == null) {
 		return (null);
 	}
 
-	task = new tasktype ();
+	const task = new tasktype ();
 	if ((typeof configureParams != "object") || (configureParams == null)) {
 		configureParams = { };
 	}
-	if (task.configure (configureParams) != Result.SUCCESS) {
+	if (task.configure (configureParams) != Result.Success) {
 		return (null);
 	}
 
 	return (task);
 };
 
-// executeTask - Execute a task of the specified type name and configuration and invoke the provided callback when complete, with "err" and "resultObject" parameters. If no callback is provided, instead return a promise that resolves if the task succeeds or rejects if it doesn't.
-Task.executeTask = function (typeName, configureParams, endCallback) {
-	let execute = (executeCallback) => {
-		let task;
-
-		task = Task.createTask (typeName, configureParams);
+// Execute a task of the specified type name and configuration and invoke endCallback (err, resultObject) when complete. If endCallback is not provided, instead return a promise that executes the task.
+exports.executeTask = (typeName, configureParams, endCallback) => {
+	const execute = (executeCallback) => {
+		const task = exports.createTask (typeName, configureParams);
 		if (task == null) {
 			executeCallback ("Invalid task configuration", null);
 			return;

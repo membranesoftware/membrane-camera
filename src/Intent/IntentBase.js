@@ -1,6 +1,5 @@
 /*
-* Copyright 2019 Membrane Software <author@membranesoftware.com>
-*                 https://membranesoftware.com
+* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -33,48 +32,30 @@
 "use strict";
 
 const App = global.App || { };
+const Path = require ("path");
 const UuidV4 = require ("uuid/v4");
-const Result = require (App.SOURCE_DIRECTORY + "/Result");
-const Log = require (App.SOURCE_DIRECTORY + "/Log");
-const SystemInterface = require (App.SOURCE_DIRECTORY + "/SystemInterface");
-const AgentControl = require (App.SOURCE_DIRECTORY + "/Intent/AgentControl");
-
-const UPDATE_LOG_PERIOD = 120000; // milliseconds
+const Result = require (Path.join (App.SOURCE_DIRECTORY, "Result"));
+const Log = require (Path.join (App.SOURCE_DIRECTORY, "Log"));
+const SystemInterface = require (Path.join (App.SOURCE_DIRECTORY, "SystemInterface"));
+const Prng = require (Path.join (App.SOURCE_DIRECTORY, "Prng"));
 
 class IntentBase {
 	constructor () {
-		// Set this AgentControl object to provide the intent with agent visibility
-		this.agentControl = null;
-
-		// Set this value to specify the intent's ID (a UUID string)
+		// Read-write data members
 		this.id = "00000000-0000-0000-0000-000000000000";
-
-		// Set this value to specify the intent's name
 		this.name = "Intent";
-
-		// Set this value to specify the intent's group name
 		this.groupName = "";
-
-		// Set this value to specify the intent's display name
 		this.displayName = "Job";
-
-		// Set this value to specify whether the intent should be active. If inactive, the intent does not execute its update loop.
 		this.isActive = true;
-
-		// Set this value to specify the intent's description
-		this.description = "";
-
-		// An object used for holding persistent state associated with the intent, to be written as a record in the data store. Note that a MongoDB data store limits records to 16MB in size; intents should take care to keep state data below that maximum.
+		this.configureCommandId = -1;
+		this.conditions = [ ];
 		this.state = { };
-
-		// Set this value to a SystemInterface type that should be applied for parsing the state object
 		this.stateType = "";
-
-		// This value holds the current time during update calls
 		this.updateTime = 0;
-
-		// Set values in this map for inclusion in status report strings
 		this.statusMap = { };
+		this.conditionMap = { };
+
+		this.prng = new Prng ();
 	}
 
 	// Configure the intent's state using values in the provided params object. Returns a Result value.
@@ -88,23 +69,35 @@ class IntentBase {
 	// Configure the intent's state using values in the provided params object and return a Result value. Subclasses are expected to implement this method.
 	doConfigure (configParams) {
 		// Default implementation does nothing
-		return (Result.SUCCESS);
+		return (Result.Success);
+	}
+
+	// Configure the intent's state using the provided command and return a Result value.
+	configureFromCommand (cmdInv) {
+		if (this.configureCommandId < 0) {
+			return (Result.UnknownTypeError);
+		}
+		if (cmdInv.command != this.configureCommandId) {
+			return (Result.InvalidParamsError);
+		}
+
+		return (this.configure (cmdInv.params));
 	}
 
 	// Return a string description of the intent
 	toString () {
-		let s, keys, i;
+		let s;
 
-		s = "<Intent id=" + this.id + " name=" + this.name;
+		s = `<Intent id=${this.id} name=${this.name} displayName="${this.displayName}"`;
 		if (this.groupName != "") {
-			s += " groupName=" + this.groupName;
+			s += ` groupName=${this.groupName}`;
 		}
-		s += " isActive=" + this.isActive;
-		keys = Object.keys (this.statusMap);
+		s += ` isActive=${this.isActive}`;
+		const keys = Object.keys (this.statusMap);
 		if (keys.length > 0) {
 			keys.sort ();
-			for (i = 0; i < keys.length; ++i) {
-				s += " " + keys[i] + "=\"" + this.statusMap[keys[i]] + "\"";
+			for (let i = 0; i < keys.length; ++i) {
+				s += ` ${keys[i]}="${this.statusMap[keys[i]]}"`;
 			}
 		}
 		s += ">";
@@ -114,27 +107,30 @@ class IntentBase {
 
 	// Return an object containing fields from the intent, suitable for use as parameters in an IntentState command
 	getIntentState () {
-		let state;
-
-		if (this.stateType == "") {
-			state = this.state;
-		}
-		else {
-			state = SystemInterface.parseTypeObject (this.stateType, this.state);
-			if (SystemInterface.isError (state)) {
-				Log.warn (`Failed to store intent state; name=${this.name} stateType=${this.stateType} err=${state}`);
-				state = { };
-			}
-		}
-
-		return ({
+		const result = {
 			id: this.id,
 			name: this.name,
 			groupName: this.groupName,
 			displayName: this.displayName,
-			isActive: this.isActive,
-			state: state
-		});
+			isActive: this.isActive
+		};
+
+		if (this.conditions.length > 0) {
+			result.conditions = this.conditions;
+		}
+
+		if (this.stateType == "") {
+			result.state = this.state;
+		}
+		else {
+			result.state = SystemInterface.parseTypeObject (this.stateType, this.state);
+			if (SystemInterface.isError (result.state)) {
+				Log.warn (`Failed to store intent state; name=${this.name} stateType=${this.stateType} err=${result.state}`);
+				result.state = { };
+			}
+		}
+
+		return (result);
 	}
 
 	// Reset fields in the intent using values from the provided IntentState params object
@@ -146,6 +142,11 @@ class IntentBase {
 		this.groupName = intentState.groupName;
 		this.displayName = intentState.displayName;
 		this.isActive = intentState.isActive;
+
+		this.conditions = [ ];
+		if (Array.isArray (intentState.conditions)) {
+			this.conditions = intentState.conditions;
+		}
 
 		if (this.stateType == "") {
 			this.state = intentState.state;
@@ -168,20 +169,33 @@ class IntentBase {
 		}
 	}
 
+	// Return a map of condition names to priority values, as computed from current state matched against configured conditions
+	matchConditions () {
+		// Superclass method takes no action
+		return (this.doMatchConditions ());
+	}
+
+	// Return a subclass-specific map of condition names to priority values, as computed from current state matched against configured conditions
+	doMatchConditions () {
+		// Default implementation returns no matches
+		return ({ });
+	}
+
+	// Return a boolean value indicating if conditionMap indicates possession of the named condition
+	getCondition (conditionName) {
+		return (this.conditionMap[conditionName] === this.id);
+	}
+
 	// Perform actions appropriate for the current state of the application
 	update () {
-		let now;
-
 		if (! this.isActive) {
 			return;
 		}
 
-		now = new Date ().getTime ();
-		this.updateTime = now;
 		this.doUpdate ();
 	}
 
-	// Perform actions appropriate for the current state of the application. Subclasses are expected to implement this method.
+	// Perform subclass-specific actions appropriate for the current state of the application
 	doUpdate () {
 		// Default implementation does nothing
 	}
@@ -208,11 +222,19 @@ class IntentBase {
 		// Default implementation does nothing
 	}
 
-	// Return a boolean value indicating if the task's last update time indicates that the specified time period has elapsed. startTime and period are both measured in milliseconds.
-	hasTimeElapsed (startTime, period) {
-		let diff;
+	// Return an object containing a command with the default agent prefix and the provided parameters, or null if the command could not be validated, in which case an error log message is generated
+	createCommand (commandName, commandType, commandParams) {
+		const cmd = SystemInterface.createCommand (App.systemAgent.getCommandPrefix (), commandName, commandType, commandParams);
+		if (SystemInterface.isError (cmd)) {
+			return (null);
+		}
 
-		diff = this.updateTime - startTime;
+		return (cmd);
+	}
+
+	// Return a boolean value indicating if the specified time period has elapsed, relative to the intent's update time. startTime and period are both measured in milliseconds.
+	hasTimeElapsed (startTime, period) {
+		const diff = this.updateTime - startTime;
 		return (diff >= period);
 	}
 
@@ -227,7 +249,7 @@ class IntentBase {
 			return (false);
 		}
 
-		for (let i of obj) {
+		for (const i of obj) {
 			if (typeof i != "string") {
 				return (false);
 			}
@@ -238,69 +260,98 @@ class IntentBase {
 
 	// Suspend all items in the provided map of RepeatTasks items
 	suspendTasks (taskMap) {
-		let i, task;
-
-		for (i in taskMap) {
-			task = taskMap[i];
+		for (const i in taskMap) {
+			const task = taskMap[i];
 			task.suspendRepeat ();
 		}
 	}
 
 	// Resume all items in the provided map of RepeatTasks items
 	resumeTasks (taskMap) {
-		let i, task;
-
-		for (i in taskMap) {
-			task = taskMap[i];
+		for (const i in taskMap) {
+			const task = taskMap[i];
 			task.setNextRepeat (0);
 		}
 	}
 
 	// Return a newly created array with the same contents as the provided source array
 	copyArray (sourceArray) {
-		let a, i;
-
-		a = [ ];
-		for (i = 0; i < sourceArray.length; ++i) {
+		const a = [ ];
+		for (let i = 0; i < sourceArray.length; ++i) {
 			a.push (sourceArray[i]);
 		}
 		return (a);
 	}
 
-	// Return a newly created array containing indexes for use in tracking choices from a source array
-	createChoiceArray (sourceArray) {
-		let a;
-
-		a = [ ];
-		for (let i = 0; i < sourceArray.length; ++i) {
-			a.push (i);
+	// Choose the next sequential item from itemArray. To track the chosen item, update choiceArray (expected to be an empty array for the first call). Returns the chosen item, or null if no items were available.
+	getSequentialChoice (itemArray, choiceArray) {
+		if ((! Array.isArray (itemArray)) || (itemArray.length <= 0)) {
+			return (null);
 		}
-
-		return (a);
-	}
-
-	// Choose an index at random from the provided choice array, while updating the array to track the chosen item. Returns the chosen index, or -1 if no choices were available
-	getRandomChoice (choiceArray) {
-		let pos, result;
+		if (! Array.isArray (choiceArray)) {
+			return (itemArray[0]);
+		}
 
 		if (choiceArray.length <= 0) {
-			return (-1);
+			this.populateChoiceArray (choiceArray, itemArray.length);
 		}
-
-		pos = App.systemAgent.getRandomInteger (0, choiceArray.length - 1);
-		result = choiceArray[pos];
-		choiceArray.splice (pos, 1);
+		const result = itemArray[choiceArray.shift ()];
+		if (choiceArray.length <= 0) {
+			this.populateChoiceArray (choiceArray, itemArray.length);
+		}
 
 		return (result);
 	}
 
-	// Return an array containing contacted agents that cause the provided predicate function to generate a true value
-	findAgents (matchFunction) {
-		if (this.agentControl == null) {
-			return ([ ]);
+	// Choose an item at random from itemArray. To track the chosen item, update choiceArray (expected to be an empty array for the first call). Returns the chosen item, or null if no items were available.
+	getRandomChoice (itemArray, choiceArray) {
+		if ((! Array.isArray (itemArray)) || (itemArray.length <= 0)) {
+			return (null);
 		}
-		return (this.agentControl.findAgents (matchFunction));
+		if (! Array.isArray (choiceArray)) {
+			return (itemArray[this.prng.getRandomInteger (0, itemArray.length - 1)]);
+		}
+
+		if (choiceArray.length <= 0) {
+			this.populateChoiceArray (choiceArray, itemArray.length, true);
+		}
+		const index = choiceArray.shift ();
+		const result = itemArray[index];
+		if (choiceArray.length <= 0) {
+			this.populateChoiceArray (choiceArray, itemArray.length, true, index);
+		}
+
+		return (result);
+	}
+
+	// Add index items to choiceArray as needed to track a new choice run, optionally shuffling the choices as they are added. If isShuffle is true and firstExcludeChoice is provided, ensure that the first populated choice item does not match that value.
+	populateChoiceArray (choiceArray, choiceCount, isShuffle, firstExcludeChoice) {
+		let pos;
+
+		if (isShuffle !== true) {
+			for (let i = 0; i < choiceCount; ++i) {
+				choiceArray.push (i);
+			}
+			return;
+		}
+
+		const choices = [ ];
+		for (let i = 0; i < choiceCount; ++i) {
+			choices.push (i);
+		}
+		for (let i = 0; i < choiceCount; ++i) {
+			while (true) {
+				pos = this.prng.getRandomInteger (0, choices.length - 1);
+				if (typeof firstExcludeChoice == "number") {
+					if ((i == 0) && (choiceCount > 1) && (choices[pos] == firstExcludeChoice)) {
+						continue;
+					}
+				}
+				break;
+			}
+			choiceArray.push (choices[pos]);
+			choices.splice (pos, 1);
+		}
 	}
 }
-
 module.exports = IntentBase;

@@ -1,6 +1,5 @@
 /*
-* Copyright 2019 Membrane Software <author@membranesoftware.com>
-*                 https://membranesoftware.com
+* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -28,51 +27,21 @@
 * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 * POSSIBILITY OF SUCH DAMAGE.
 */
-// Class that tracks the state of remote system agents
+// Utility functions for program logic
 
 "use strict";
 
-const App = global.App || { };
-const Result = require (App.SOURCE_DIRECTORY + "/Result");
-const Log = require (App.SOURCE_DIRECTORY + "/Log");
-const MapUtil = require (App.SOURCE_DIRECTORY + "/MapUtil");
-const SystemInterface = require (App.SOURCE_DIRECTORY + "/SystemInterface");
-const Agent = require (App.SOURCE_DIRECTORY + "/Intent/Agent");
+// Return an item from a map, or undefined if the item wasn't found. If createFn is a function that returns an object, use it to create a new map item for any nonexistent key.
+exports.getMapItem = (map, key, createFn) => {
+	let item;
 
-class AgentControl {
-	constructor () {
-		// A map of URL hostname values to Agent objects
-		this.agentMap = { };
-	}
-
-	// Return a string representation of the object
-	toString () {
-		return (`<AgentControl count=${Object.keys (this.agentMap).length}>`);
-	}
-
-	// Store data received with an AgentStatus command
-	updateAgentStatus (statusCommand) {
-		let agent;
-
-		agent = MapUtil.getItem (this.agentMap, statusCommand.params.id, () => {
-			return (new Agent ());
-		});
-		agent.updateStatus (statusCommand);
-	}
-
-	// Return an array containing contacted agents that cause the provided predicate function to generate a true value
-	findAgents (matchFunction) {
-		let m;
-
-		m = [ ];
-		for (let agent of Object.values (this.agentMap)) {
-			if (matchFunction (agent)) {
-				m.push (agent);
-			}
+	item = map[key];
+	if (item === undefined) {
+		if (typeof createFn == "function") {
+			item = createFn ();
+			map[key] = item;
 		}
-
-		return (m);
 	}
-}
 
-module.exports = AgentControl;
+	return (item);
+};
