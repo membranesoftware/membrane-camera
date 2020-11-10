@@ -92,3 +92,23 @@ exports.getDurationString = (ms) => {
 
 	return (duration);
 };
+
+// Return a size string for the provided number of bytes
+exports.getSizeString = (size) => {
+	if (size <= 0) {
+		return ("0B");
+	}
+	if (size >= (1024 * 1024 * 1024)) {
+		const val = size / (1024 * 1024 * 1024);
+		return (`${val.toFixed (2)}GB`);
+	}
+	if (size >= (1024 * 1024)) {
+		const val = size / (1024 * 1024);
+		return (`${val.toFixed (2)}MB`);
+	}
+	if (size >= 1024) {
+		const val = size / 1024;
+		return (`${val.toFixed (2)}kB`);
+	}
+	return (`${size}B`);
+};

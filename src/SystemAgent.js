@@ -829,7 +829,7 @@ class SystemAgent {
 				}
 			}
 			for (const server of this.serverList) {
-				server.configure (state[server.getAgentConfigurationKey ()]);
+				server.configure (state[server.agentConfigurationKey]);
 				if (! server.isConfigured) {
 					process.nextTick (() => {
 						executeCallback (`${server.name} is not configured`);
@@ -937,7 +937,7 @@ class SystemAgent {
 
 		err = false;
 		for (const server of this.serverList) {
-			conf = cmdInv.params.agentConfiguration[server.getAgentConfigurationKey ()];
+			conf = cmdInv.params.agentConfiguration[server.agentConfigurationKey];
 			if ((typeof conf == "object") && (conf != null)) {
 				if (! server.isConfigurationValid (conf)) {
 					err = true;
@@ -957,10 +957,10 @@ class SystemAgent {
 			this.runState.agentConfiguration = { };
 		}
 		for (const server of this.serverList) {
-			conf = cmdInv.params.agentConfiguration[server.getAgentConfigurationKey ()];
+			conf = cmdInv.params.agentConfiguration[server.agentConfigurationKey];
 			if ((typeof conf == "object") && (conf != null)) {
 				server.configure (conf);
-				this.runState.agentConfiguration[server.getAgentConfigurationKey ()] = conf;
+				this.runState.agentConfiguration[server.agentConfigurationKey] = conf;
 			}
 		}
 

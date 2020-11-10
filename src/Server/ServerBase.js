@@ -38,31 +38,16 @@ const SystemInterface = require (Path.join (App.SOURCE_DIRECTORY, "SystemInterfa
 
 class ServerBase {
 	constructor () {
-		// Set this value to specify the server's name, usually expected to match its class name
 		this.name = "ServerBase";
-
-		// Set this value to specify the server's description
+		this.agentConfigurationKey = "";
+		this.agentStatusKey = "";
 		this.description = "";
-
-		// Populate this list with SystemInterface Type field items to specify parameters acceptable for server configuration
 		this.configureParams = [ ];
-
-		// Set values in this map for use as default configuration parameters
 		this.baseConfiguration = { };
-
-		// Fields in this object are set by the configure method, using items from the configureParams list
 		this.configureMap = { };
-
-		// Fields in this object are set by the configure method, storing fields that differ from the base configuration
 		this.deltaConfiguration = { };
-
-		// Set values in this map that should be included in status report strings
 		this.statusMap = { };
-
-		// Set this value to indicate whether the server has been configured with valid parameters
 		this.isConfigured = false;
-
-		// Set this value to indicate whether the server is running
 		this.isRunning = false;
 	}
 
@@ -79,14 +64,11 @@ class ServerBase {
 		return (s);
 	}
 
-	// Return the AgentConfiguration field name that holds configuration values for servers of this type
-	getAgentConfigurationKey () {
-		return (`${this.name.substring (0, 1).toLowerCase ()}${this.name.substring (1)}Configuration`);
-	}
-
-	// Return the AgentStatus field name that holds status values for servers of this type
-	getAgentStatusKey () {
-		return (`${this.name.substring (0, 1).toLowerCase ()}${this.name.substring (1)}Status`);
+	// Set the server's name and related fields
+	setName (name) {
+		this.name = name;
+		this.agentConfigurationKey = `${this.name.substring (0, 1).toLowerCase ()}${this.name.substring (1)}Configuration`;
+		this.agentStatusKey = `${this.name.substring (0, 1).toLowerCase ()}${this.name.substring (1)}Status`;
 	}
 
 	// Configure the server using values in the provided params object and set the isConfigured data member to reflect whether the configuration was successful
@@ -172,7 +154,6 @@ class ServerBase {
 		if (! this.isRunning) {
 			return (null);
 		}
-
 		return (this.doGetStatus ());
 	}
 
@@ -188,8 +169,7 @@ class ServerBase {
 		if (cmd == null) {
 			return;
 		}
-
-		fields[this.getAgentStatusKey ()] = cmd.params;
+		fields[this.agentStatusKey] = cmd.params;
 	}
 
 	// Return a boolean value indicating if the provided AgentStatus command contains a server status change
@@ -197,7 +177,6 @@ class ServerBase {
 		if (! this.isRunning) {
 			return (false);
 		}
-
 		return (this.doFindStatusChange (agentStatus));
 	}
 
@@ -217,7 +196,7 @@ class ServerBase {
 			c[i] = this.deltaConfiguration[i];
 		}
 		this.doGetConfiguration (c);
-		agentConfiguration[this.getAgentConfigurationKey ()] = c;
+		agentConfiguration[this.agentConfigurationKey] = c;
 	}
 
 	// Add subclass-specific fields to the provided server configuration object, covering default values not present in the delta configuration
@@ -232,7 +211,6 @@ class ServerBase {
 			Log.err (`${this.toString ()} failed to create command invocation; commandName=${commandName} err=${cmd}`);
 			return (null);
 		}
-
 		return (cmd);
 	}
 }

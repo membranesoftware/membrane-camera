@@ -48,12 +48,20 @@ const GetDiskSpacePeriod = 7 * 60 * 1000; // milliseconds
 class CameraServer extends ServerBase {
 	constructor () {
 		super ();
-		this.name = "CameraServer";
+		this.setName ("CameraServer");
 		this.description = "Accept and execute commands to control a camera device";
 
-		this.configureParams = [ ];
+		this.configureParams = [
+			{
+				name: "captureReboot",
+				type: "boolean",
+				flags: 0,
+				description: "A boolean value indicating if the server should reboot its host system to recover from capture failures"
+			}
+		];
 
 		this.isReady = false;
+		this.isCaptureRebootEnabled = false;
 		this.totalStorage = 0; // bytes
 		this.freeStorage = 0; // bytes
 		this.usedStorage = 0; // bytes
@@ -74,6 +82,18 @@ class CameraServer extends ServerBase {
 		this.lastCaptureTime = 0;
 		this.lastCaptureWidth = 0;
 		this.lastCaptureHeight = 0;
+	}
+
+	// Execute actions appropriate when the server has been successfully configured
+	doConfigure () {
+		if (this.configureMap.captureReboot === true) {
+			this.isCaptureRebootEnabled = true;
+		}
+	}
+
+	// Change subclass-specific fields in the provided server configuration object
+	doGetConfiguration (fields) {
+		delete (fields.captureReboot);
 	}
 
 	// Start the server's operation and invoke startCallback (err) when complete

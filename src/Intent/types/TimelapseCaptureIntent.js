@@ -33,20 +33,24 @@ const App = global.App || { };
 const Fs = require ("fs");
 const Path = require ("path");
 const EventEmitter = require ("events").EventEmitter;
-const Async = require ("async");
 const Result = require (Path.join (App.SOURCE_DIRECTORY, "Result"));
 const Log = require (Path.join (App.SOURCE_DIRECTORY, "Log"));
 const FsUtil = require (Path.join (App.SOURCE_DIRECTORY, "FsUtil"));
 const SystemInterface = require (Path.join (App.SOURCE_DIRECTORY, "SystemInterface"));
-const ExecProcess = require (Path.join (App.SOURCE_DIRECTORY, "ExecProcess"));
+const Task = require (Path.join (App.SOURCE_DIRECTORY, "Task", "Task"));
 const IntentBase = require (Path.join (App.SOURCE_DIRECTORY, "Intent", "IntentBase"));
 
-const CaptureProcessName = "/usr/bin/raspistill";
+const RaspistillProcessName = "/usr/bin/raspistill";
+const SyncProcessName = "/bin/sync";
+const KillallProcessName = "/usr/bin/killall";
+const RebootProcessName = "reboot";
 const MaxImageWidth = 3280;
 const MaxImageHeight = 2464;
 const MaxCaptureDirectoryCount = 4096;
 const PruneTriggerPercent = 98; // Percent of total storage space used
 const PruneTargetPercent = 96; // Percent of total storage space used
+const RaspistillKillTimeout = 128000; // ms
+const KillRebootThreshold = 2;
 const CaptureIdleEventName = "captureIdle";
 
 class TimelapseCaptureIntent extends IntentBase {
@@ -65,6 +69,8 @@ class TimelapseCaptureIntent extends IntentBase {
 		this.isCaptureReady = false;
 		this.isScanningDirectory = false;
 		this.isCapturing = false;
+		this.killTime = 0;
+		this.killCount = 0;
 		this.capturePath = "";
 		this.capturePathCount = 0;
 		this.eventEmitter = new EventEmitter ();
@@ -129,6 +135,18 @@ class TimelapseCaptureIntent extends IntentBase {
 				this.state.nextCaptureTime = this.updateTime + (this.state.capturePeriod * 1000);
 			}
 		}
+
+		if (this.isCapturing && (this.killTime > 0)) {
+			if (this.updateTime >= this.killTime) {
+				++(this.killCount);
+				this.killTime = 0;
+				App.systemAgent.runProcess (KillallProcessName, [
+					"-q", Path.basename (RaspistillProcessName)
+				]).catch ((err) => {
+					Log.err (`${this.toString ()} error stopping raspistill process; err=${err}`);
+				})
+			}
+		}
 	}
 
 	// Execute operations to read cache directories and file metadata, then prepare the cache directory to store capture images
@@ -155,6 +173,8 @@ class TimelapseCaptureIntent extends IntentBase {
 	captureImage () {
 		let imagepath, imageprofile, imagewidth, imageheight, imagetime;
 
+		const server = App.systemAgent.getServer ("CameraServer");
+
 		this.isCapturing = true;
 		if ((this.capturePath == "") || (this.capturePathCount >= MaxCaptureDirectoryCount)) {
 			const now = Date.now ();
@@ -163,101 +183,95 @@ class TimelapseCaptureIntent extends IntentBase {
 			this.capturePathCount = 0;
 		}
 		FsUtil.createDirectory (this.capturePath).then (() => {
-			return (new Promise ((resolve, reject) => {
-				const args = [
-					"-t", "1",
-					"-e", "jpg",
-					"-q", "97"
-				];
+			const args = [
+				"-t", "1",
+				"-e", "jpg",
+				"-q", "97"
+			];
 
-				imageprofile = SystemInterface.Constant.DefaultImageProfile;
-				if ((App.systemAgent.runState.cameraConfiguration != null) && (typeof App.systemAgent.runState.cameraConfiguration.imageProfile == "number")) {
-					imageprofile = App.systemAgent.runState.cameraConfiguration.imageProfile;
+			imageprofile = SystemInterface.Constant.DefaultImageProfile;
+			if ((App.systemAgent.runState.cameraConfiguration != null) && (typeof App.systemAgent.runState.cameraConfiguration.imageProfile == "number")) {
+				imageprofile = App.systemAgent.runState.cameraConfiguration.imageProfile;
+			}
+			switch (imageprofile) {
+				case SystemInterface.Constant.HighQualityImageProfile: {
+					imagewidth = MaxImageWidth;
+					imageheight = MaxImageHeight;
+					break;
 				}
-				switch (imageprofile) {
-					case SystemInterface.Constant.HighQualityImageProfile: {
-						imagewidth = MaxImageWidth;
-						imageheight = MaxImageHeight;
+				case SystemInterface.Constant.LowQualityImageProfile: {
+					imagewidth = Math.floor (MaxImageWidth / 4);
+					imageheight = Math.floor (MaxImageHeight / 4);
+					break;
+				}
+				case SystemInterface.Constant.LowestQualityImageProfile: {
+					imagewidth = Math.floor (MaxImageWidth / 8);
+					imageheight = Math.floor (MaxImageHeight / 8);
+					break;
+				}
+				default: {
+					imagewidth = Math.floor (MaxImageWidth / 2);
+					imageheight = Math.floor (MaxImageHeight / 2);
+					break;
+				}
+			}
+
+			if (imagewidth < 1) {
+				imagewidth = 1;
+			}
+			if (imageheight < 1) {
+				imageheight = 1;
+			}
+			args.push ("-w", imagewidth);
+			args.push ("-h", imageheight);
+
+			if ((App.systemAgent.runState.cameraConfiguration != null) && (typeof App.systemAgent.runState.cameraConfiguration.flip == "number")) {
+				switch (App.systemAgent.runState.cameraConfiguration.flip) {
+					case SystemInterface.Constant.HorizontalFlip: {
+						args.push ("-hf");
 						break;
 					}
-					case SystemInterface.Constant.LowQualityImageProfile: {
-						imagewidth = Math.floor (MaxImageWidth / 4);
-						imageheight = Math.floor (MaxImageHeight / 4);
+					case SystemInterface.Constant.VerticalFlip: {
+						args.push ("-vf");
 						break;
 					}
-					case SystemInterface.Constant.LowestQualityImageProfile: {
-						imagewidth = Math.floor (MaxImageWidth / 8);
-						imageheight = Math.floor (MaxImageHeight / 8);
-						break;
-					}
-					default: {
-						imagewidth = Math.floor (MaxImageWidth / 2);
-						imageheight = Math.floor (MaxImageHeight / 2);
+					case SystemInterface.Constant.HorizontalAndVerticalFlip: {
+						args.push ("-hf");
+						args.push ("-vf");
 						break;
 					}
 				}
+			}
 
-				if (imagewidth < 1) {
-					imagewidth = 1;
+			imagetime = Date.now ();
+			imagepath = Path.join (this.capturePath, `${imagetime}_${imagewidth}x${imageheight}.jpg`);
+			args.push ("-o", imagepath);
+			if ((server != null) && server.isCaptureRebootEnabled) {
+				this.killTime = imagetime + RaspistillKillTimeout;
+			}
+			return (App.systemAgent.runProcess (RaspistillProcessName, args, { }, this.dataPath, (lines, parseCallback) => {
+				for (const line of lines) {
+					Log.debug (`${RaspistillProcessName}: ${line}`);
 				}
-				if (imageheight < 1) {
-					imageheight = 1;
-				}
-				args.push ("-w", imagewidth);
-				args.push ("-h", imageheight);
-
-				if ((App.systemAgent.runState.cameraConfiguration != null) && (typeof App.systemAgent.runState.cameraConfiguration.flip == "number")) {
-					switch (App.systemAgent.runState.cameraConfiguration.flip) {
-						case SystemInterface.Constant.HorizontalFlip: {
-							args.push ("-hf");
-							break;
-						}
-						case SystemInterface.Constant.VerticalFlip: {
-							args.push ("-vf");
-							break;
-						}
-						case SystemInterface.Constant.HorizontalAndVerticalFlip: {
-							args.push ("-hf");
-							args.push ("-vf");
-							break;
-						}
-					}
-				}
-
-				imagetime = Date.now ();
-				imagepath = Path.join (this.capturePath, `${imagetime}_${imagewidth}x${imageheight}.jpg`);
-				args.push ("-o", imagepath);
-				new ExecProcess (CaptureProcessName, args, { }, this.dataPath, null, (err, isExitSuccess) => {
-					if (err != null) {
-						reject (err);
-						return;
-					}
-					if (! isExitSuccess) {
-						reject (Error ("Image capture process ended with non-success result"));
-						return;
-					}
-
-					resolve ();
-				});
+				process.nextTick (parseCallback);
 			}));
-		}).then (() => {
+		}).then ((isExitSuccess) => {
+			this.killTime = 0;
+			if (! isExitSuccess) {
+				return (Promise.reject (Error ("Image capture process ended with non-success result")));
+			}
+			this.killCount = 0;
 			return (FsUtil.fileExists (imagepath))
 		}).then ((exists) => {
 			if (! exists) {
 				return (Promise.reject (Error ("Image capture process failed to create output file")));
 			}
 
-			return (Promise.resolve ());
-		}).then (() => {
-			return (this.pruneCacheFiles ());
-		}).then (() => {
 			this.lastCaptureFile = imagepath;
 			this.lastCaptureTime = imagetime;
 			this.lastCaptureWidth = imagewidth;
 			this.lastCaptureHeight = imageheight;
 			++(this.capturePathCount);
-
-			const server = App.systemAgent.getServer ("CameraServer");
 			if (server != null) {
 				server.captureDirectoryTimes = this.captureDirectoryTimes;
 				server.lastCaptureFile = this.lastCaptureFile;
@@ -267,172 +281,137 @@ class TimelapseCaptureIntent extends IntentBase {
 				if (server.minCaptureTime <= 0) {
 					server.minCaptureTime = server.lastCaptureTime;
 				}
-				server.getDiskSpaceTask.setNextRepeat (0);
 			}
 		}).catch ((err) => {
 			Log.err (`${this.toString ()} failed to capture image; capturePath=${this.capturePath} err=${err}`);
+			if (this.killCount >= KillRebootThreshold) {
+				this.killCount = 0;
+				Log.info (`${this.toString ()} reboot system for raspistill failure`);
+				App.systemAgent.runProcess (RebootProcessName).catch ((err) => {
+					Log.err (`${this.toString ()} error running reboot process; err=${err}`);
+				})
+			}
+		}).then (() => {
+			this.killTime = 0;
+			return (this.pruneCacheFiles ());
+		}).catch ((err) => {
+			Log.err (`${this.toString ()} failed to prune camera cache; path=${this.dataPath} err=${err}`);
 		}).then (() => {
 			this.isCapturing = false;
 			this.eventEmitter.emit (CaptureIdleEventName);
+			if (server != null) {
+				server.getDiskSpaceTask.setNextRepeat (0);
+			}
 		});
 	}
 
-	// Return a promise that removes the oldest files from the cache as needed to maintain the configured percentage of free storage space
-	pruneCacheFiles () {
-		return (new Promise ((resolve, reject) => {
-			let bytes, shouldrefresh;
+	// Remove the oldest files from the cache as needed to maintain the configured percentage of free storage space
+	async pruneCacheFiles () {
+		let bytes, dirfiles, mintime;
 
-			const server = App.systemAgent.getServer ("CameraServer");
-			if ((server == null) || (server.totalStorage <= 0) || (this.captureDirectoryTimes.length <= 0)) {
-				resolve ();
-				return;
+		const server = App.systemAgent.getServer ("CameraServer");
+		if ((server == null) || (server.totalStorage <= 0) || (this.captureDirectoryTimes.length <= 0)) {
+			return;
+		}
+
+		const df = await Task.executeTask ("GetDiskSpace", { targetPath: this.dataPath });
+		if (df.total <= 0) {
+			return;
+		}
+		const pct = ((df.total - df.free) / df.total) * 100;
+		if (pct < PruneTriggerPercent) {
+			return;
+		}
+
+		bytes = df.free;
+		const targetbytes = Math.floor ((df.total * (100 - PruneTargetPercent)) / 100);
+		const imagefiles = [ ];
+		const targetfiles = [ ];
+		const dirname = `${this.captureDirectoryTimes[0]}`;
+		const dirpath = Path.join (this.dataPath, dirname);
+		dirfiles = await FsUtil.readDirectory (dirpath);
+		for (const file of dirfiles) {
+			const f = TimelapseCaptureIntent.parseImageFilename (file);
+			if (f != null) {
+				imagefiles.push (f);
 			}
-
-			bytes = server.freeStorage;
-			const pct = 100 - ((bytes / server.totalStorage) * 100);
-			if (pct < PruneTriggerPercent) {
-				resolve ();
-				return;
+			else {
+				targetfiles.push (Path.join (dirpath, file));
 			}
+		}
+		imagefiles.sort ((a, b) => {
+			if (a.time < b.time) {
+				return (-1);
+			}
+			if (a.time > b.time) {
+				return (1);
+			}
+			return (0);
+		});
+		while (imagefiles.length > 0) {
+			if (bytes >= targetbytes) {
+				break;
+			}
+			const f = imagefiles.shift ();
+			const file = Path.join (dirpath, f.filename);
+			const stats = await FsUtil.statFile (file);
+			targetfiles.push (file);
+			bytes += stats.size;
+		}
 
-			shouldrefresh = false;
-			const targetbytes = Math.floor ((server.totalStorage * (100 - PruneTargetPercent)) / 100);
-			const dirpath = Path.join (this.dataPath, `${this.captureDirectoryTimes[0]}`);
-			FsUtil.readDirectory (dirpath).then ((files) => {
-				const imagefiles = [ ];
-				const targetfiles = [ ];
-				for (const file of files) {
-					const f = TimelapseCaptureIntent.parseImageFilename (file);
-					if (f != null) {
-						imagefiles.push (Path.join (dirpath, file));
-					}
-					else {
-						targetfiles.push (Path.join (dirpath, file));
-					}
-				}
-
-				imagefiles.sort ((a, b) => {
-					if (a.time < b.time) {
-						return (-1);
-					}
-					if (a.time > b.time) {
-						return (1);
-					}
-					return (0);
-				});
-
-				return (new Promise ((resolve, reject) => {
-					const statFile = (file, callback) => {
-						FsUtil.statFile (file, (err, stats) => {
-							if (err != null) {
-								callback (err);
-								return;
-							}
-
-							if (bytes < targetbytes) {
-								targetfiles.push (file);
-								bytes += stats.size;
-							}
-							callback ();
-						});
-					};
-
-					const endSeries = (err) => {
-						if (err != null) {
-							reject (err);
-							return;
-						}
-
-						resolve (targetfiles);
-					};
-
-					Async.eachSeries (imagefiles, statFile, endSeries);
-				}));
-			}).then ((targetFiles) => {
-				return (new Promise ((resolve, reject) => {
-					if (targetFiles.length <= 0) {
-						resolve ();
+		if (targetfiles.length <= 0) {
+			return;
+		}
+		for (const file of targetfiles) {
+			await new Promise ((resolve, reject) => {
+				Fs.unlink (file, (err) => {
+					if (err) {
+						reject (err);
 						return;
 					}
-
-					shouldrefresh = true;
-					const unlinkFile = (file, callback) => {
-						Fs.unlink (file, (err) => {
-							if (err != null) {
-								callback (err);
-								return;
-							}
-
-							callback ();
-						});
-					};
-
-					const endSeries = (err) => {
-						if (err != null) {
-							reject (err);
-							return;
-						}
-
-						resolve ();
-					};
-
-					Async.eachSeries (targetFiles, unlinkFile, endSeries);
-				}));
-			}).then (() => {
-				return (FsUtil.readDirectory (dirpath));
-			}).then ((files) => {
-				if ((! Array.isArray (files)) || (files.length > 0)) {
-					return (Promise.resolve ());
-				}
-
-				shouldrefresh = true;
-				return (new Promise ((resolve, reject) => {
-					Fs.rmdir (dirpath, (err) => {
-						if (err != null) {
-							reject (err);
-							return;
-						}
-
-						resolve ();
-					});
-				}));
-			}).then (() => {
-				if (! shouldrefresh) {
-					return (Promise.resolve (null));
-				}
-
-				return (TimelapseCaptureIntent.readCacheSummary (this.dataPath));
-			}).then ((resultObject) => {
-				if (resultObject != null) {
-					this.captureDirectoryTimes = resultObject.captureDirectoryTimes;
-					this.capturePath = resultObject.capturePath;
-					this.capturePathCount = resultObject.capturePathCount;
-					this.lastCaptureFile = resultObject.lastCaptureFile;
-					this.lastCaptureTime = resultObject.lastCaptureTime;
-					this.lastCaptureWidth = resultObject.lastCaptureWidth;
-					this.lastCaptureHeight = resultObject.lastCaptureHeight;
-					server.captureDirectoryTimes = resultObject.captureDirectoryTimes;
-					server.lastCaptureFile = resultObject.lastCaptureFile;
-					server.lastCaptureTime = resultObject.lastCaptureTime;
-					server.lastCaptureWidth = resultObject.lastCaptureWidth;
-					server.lastCaptureHeight = resultObject.lastCaptureHeight;
-					server.minCaptureTime = resultObject.minCaptureTime;
-				}
-				resolve ();
-			}).catch ((err) => {
-				reject (err);
+					resolve ();
+				});
 			});
-		}));
+		}
+		await App.systemAgent.runProcess (SyncProcessName);
+
+		if (imagefiles.length <= 0) {
+			const pos = this.captureDirectoryTimes.indexOf (+dirname);
+			if (pos >= 0) {
+				this.captureDirectoryTimes.splice (pos, 1);
+				server.captureDirectoryTimes = this.captureDirectoryTimes;
+			}
+			await FsUtil.removeDirectory (dirpath);
+
+			if (this.captureDirectoryTimes.length <= 0) {
+				server.clearCacheMetadata ();
+			}
+			else {
+				mintime = 0;
+				dirfiles = await FsUtil.readDirectory (Path.join (this.dataPath, `${this.captureDirectoryTimes[0]}`));
+				for (const file of dirfiles) {
+					const f = TimelapseCaptureIntent.parseImageFilename (file);
+					if ((f != null) && (f.time > 0)) {
+						if ((mintime <= 0) || (f.time < mintime)) {
+							mintime = f.time;
+						}
+					}
+				}
+				server.minCaptureTime = mintime;
+			}
+		}
+		else {
+			server.minCaptureTime = imagefiles[0].time;
+		}
 	}
 }
 
 // Parse the provided capture image filename and return an object with the resulting fields, or null if the parse failed
-TimelapseCaptureIntent.parseImageFilename = function (filename) {
+TimelapseCaptureIntent.parseImageFilename = (filename) => {
 	const matches = filename.match (/^([0-9]+)_([0-9]+)x([0-9]+)\.jpg$/);
 	if (matches == null) {
 		return (null);
 	}
-
 	const t = parseInt (matches[1], 10);
 	const w = parseInt (matches[2], 10);
 	const h = parseInt (matches[3], 10);
@@ -441,245 +420,185 @@ TimelapseCaptureIntent.parseImageFilename = function (filename) {
 	}
 
 	return ({
+		filename: filename,
 		time: t,
 		width: w,
 		height: h
 	});
 };
 
-// Return a promise that reads summary metadata from files in the specified cache path
-TimelapseCaptureIntent.readCacheSummary = function (cachePath) {
-	return (new Promise ((resolve, reject) => {
-		const result = {
-			captureDirectoryTimes: [ ],
-			minCaptureTime: 0,
-			lastCaptureFile: "",
-			lastCaptureTime: 0,
-			lastCaptureWidth: 0,
-			lastCaptureHeight: 0,
-			capturePath: "",
-			capturePathCount: 0
-		};
-		FsUtil.readDirectory (cachePath).then ((files) => {
-			return (new Promise ((resolve, reject) => {
-				const statDirectory = (file, callback) => {
-					if (! file.match (/^[0-9]+$/)) {
-						process.nextTick (callback);
-						return;
-					}
-					FsUtil.statFile (Path.join (cachePath, file), (err, stats) => {
-						if ((err == null) && (stats != null) && stats.isDirectory ()) {
-							result.captureDirectoryTimes.push (parseInt (file, 10));
-						}
-						callback ();
-					});
-				};
+// Read summary metadata from files in the specified cache path
+TimelapseCaptureIntent.readCacheSummary = async (cachePath) => {
+	let files;
 
-				const endSeries = (err) => {
-					if (err != null) {
-						reject (Error (err));
-						return;
-					}
-					result.captureDirectoryTimes.sort ((a, b) => {
-						if (isNaN (a) || isNaN (b) || (a == b)) {
-							return (0);
-						}
-						if (a < b) {
-							return (-1);
-						}
-						return (1);
-					});
-					resolve ();
-				};
+	const result = {
+		captureDirectoryTimes: [ ],
+		minCaptureTime: 0,
+		lastCaptureFile: "",
+		lastCaptureTime: 0,
+		lastCaptureWidth: 0,
+		lastCaptureHeight: 0,
+		capturePath: "",
+		capturePathCount: 0
+	};
 
-				Async.eachSeries (files, statDirectory, endSeries);
-			}));
-		}).then (() => {
-			return (new Promise ((resolve, reject) => {
-				if (result.captureDirectoryTimes.length <= 0) {
-					resolve ();
-					return;
-				}
-
-				FsUtil.readDirectory (Path.join (cachePath, `${result.captureDirectoryTimes[0]}`), (err, files) => {
-					if (err != null) {
-						reject (Error (err));
-						return;
-					}
-
-					for (const file of files) {
-						const f = TimelapseCaptureIntent.parseImageFilename (file);
-						if ((f != null) && (f.time > 0)) {
-							if ((result.minCaptureTime <= 0) || (f.time < result.minCaptureTime)) {
-								result.minCaptureTime = f.time;
-							}
-						}
-					}
-
-					resolve ();
-				});
-			}));
-		}).then (() => {
-			return (new Promise ((resolve, reject) => {
-				if (result.captureDirectoryTimes.length <= 0) {
-					resolve ();
-					return;
-				}
-
-				result.capturePath = Path.join (cachePath, `${result.captureDirectoryTimes[result.captureDirectoryTimes.length - 1]}`);
-				FsUtil.readDirectory (result.capturePath, (err, files) => {
-					if (err != null) {
-						reject (Error (err));
-						return;
-					}
-
-					result.lastCaptureFile = "";
-					result.lastCaptureTime = 0;
-					result.capturePathCount = 0;
-					for (const file of files) {
-						const f = TimelapseCaptureIntent.parseImageFilename (file);
-						if ((f != null) && (f.time > 0)) {
-							++(result.capturePathCount);
-							if (f.time > result.lastCaptureTime) {
-								result.lastCaptureTime = f.time;
-								result.lastCaptureWidth = f.width;
-								result.lastCaptureHeight = f.height;
-								result.lastCaptureFile = file;
-							}
-						}
-					}
-					if (result.lastCaptureFile != "") {
-						result.lastCaptureFile = Path.join (result.capturePath, result.lastCaptureFile);
-					}
-
-					resolve ();
-				});
-			}));
-		}).then (() => {
-			resolve (result);
-		}).catch ((err) => {
-			Log.err (`Failed to read cache data; path=${cachePath} err=${err}`);
-			reject (Error (err));
+	files = await FsUtil.readDirectory (cachePath);
+	for (const file of files) {
+		if (file.match (/^[0-9]+$/)) {
+			const stats = await FsUtil.statFile (Path.join (cachePath, file));
+			if ((stats != null) && stats.isDirectory ()) {
+				result.captureDirectoryTimes.push (+file);
+			}
+		}
+	}
+	if (result.captureDirectoryTimes.length > 0) {
+		result.captureDirectoryTimes.sort ((a, b) => {
+			if (isNaN (a) || isNaN (b) || (a == b)) {
+				return (0);
+			}
+			if (a < b) {
+				return (-1);
+			}
+			return (1);
 		});
-	}));
+
+		files = await FsUtil.readDirectory (Path.join (cachePath, `${result.captureDirectoryTimes[0]}`));
+		for (const file of files) {
+			const f = TimelapseCaptureIntent.parseImageFilename (file);
+			if ((f != null) && (f.time > 0)) {
+				if ((result.minCaptureTime <= 0) || (f.time < result.minCaptureTime)) {
+					result.minCaptureTime = f.time;
+				}
+			}
+		}
+
+		result.capturePath = Path.join (cachePath, `${result.captureDirectoryTimes[result.captureDirectoryTimes.length - 1]}`);
+		files = await FsUtil.readDirectory (result.capturePath);
+		result.lastCaptureFile = "";
+		result.lastCaptureTime = 0;
+		result.capturePathCount = 0;
+		for (const file of files) {
+			const f = TimelapseCaptureIntent.parseImageFilename (file);
+			if ((f != null) && (f.time > 0)) {
+				++(result.capturePathCount);
+				if (f.time > result.lastCaptureTime) {
+					result.lastCaptureTime = f.time;
+					result.lastCaptureWidth = f.width;
+					result.lastCaptureHeight = f.height;
+					result.lastCaptureFile = file;
+				}
+			}
+		}
+		if (result.lastCaptureFile != "") {
+			result.lastCaptureFile = Path.join (result.capturePath, result.lastCaptureFile);
+		}
+	}
+	return (result);
 };
 
-// Return a promise that finds cache images in the range specified by the provided FindCaptureImages command, resolving with a set of FindCaptureImagesResult fields if successful
-TimelapseCaptureIntent.findCaptureImages = function (cmdInv, cameraServer) {
-	return (new Promise ((resolve, reject) => {
-		let mintime, maxtime, i, sortCompare;
+// Find cache images in the range specified by the provided FindCaptureImages command, returning a FindCaptureImagesResult object if successful
+TimelapseCaptureIntent.findCaptureImages = async (cmdInv, cameraServer) => {
+	let mintime, maxtime, i, sortCompare, files;
 
-		const result = {
-			captureTimes: [ ]
+	const result = {
+		captureTimes: [ ]
+	};
+	if ((! Array.isArray (cameraServer.captureDirectoryTimes)) || (cameraServer.captureDirectoryTimes.length <= 0)) {
+		return (result);
+	}
+	mintime = cmdInv.params.minTime;
+	if (mintime <= 0) {
+		mintime = cameraServer.minCaptureTime;
+	}
+	maxtime = cmdInv.params.maxTime;
+	if (maxtime <= 0) {
+		maxtime = cameraServer.lastCaptureTime;
+	}
+
+	const dirpaths = [ ];
+	if (cmdInv.params.isDescending) {
+		i = cameraServer.captureDirectoryTimes.length - 1;
+		while (i > 0) {
+			if (cameraServer.captureDirectoryTimes[i] <= maxtime) {
+				break;
+			}
+			--i;
+		}
+		while (i >= 0) {
+			dirpaths.push (Path.join (cameraServer.cacheDataPath, `${cameraServer.captureDirectoryTimes[i]}`));
+			--i;
+		}
+
+		sortCompare = (a, b) => {
+			if (a < b) {
+				return (1);
+			}
+			if (a > b) {
+				return (-1);
+			}
+			return (0);
 		};
-		if ((! Array.isArray (cameraServer.captureDirectoryTimes)) || (cameraServer.captureDirectoryTimes.length <= 0)) {
-			resolve (result);
-			return;
+	}
+	else {
+		i = 0;
+		while (i < (cameraServer.captureDirectoryTimes.length - 1)) {
+			if (cameraServer.captureDirectoryTimes[i] <= mintime) {
+				break;
+			}
+			++i;
 		}
-		mintime = cmdInv.params.minTime;
-		if (mintime <= 0) {
-			mintime = cameraServer.minCaptureTime;
-		}
-		maxtime = cmdInv.params.maxTime;
-		if (maxtime <= 0) {
-			maxtime = cameraServer.lastCaptureTime;
+		while (i < cameraServer.captureDirectoryTimes.length) {
+			dirpaths.push (Path.join (cameraServer.cacheDataPath, `${cameraServer.captureDirectoryTimes[i]}`));
+			++i;
 		}
 
-		const dirpaths = [ ];
-		if (cmdInv.params.isDescending) {
-			i = cameraServer.captureDirectoryTimes.length - 1;
-			while (i > 0) {
-				if (cameraServer.captureDirectoryTimes[i] <= maxtime) {
+		sortCompare = (a, b) => {
+			if (a < b) {
+				return (-1);
+			}
+			if (a > b) {
+				return (1);
+			}
+			return (0);
+		};
+	}
+
+	const maxresults = cmdInv.params.maxResults;
+	for (const path of dirpaths) {
+		if ((maxresults > 0) && (result.captureTimes.length >= maxresults)) {
+			break;
+		}
+		try {
+			files = await FsUtil.readDirectory (path);
+		}
+		catch (err) {
+			Log.debug (`TimelapseCaptureIntent.findCaptureImages readdir failed; path=${path} err=${err}`);
+			continue;
+		}
+
+		const times = [ ];
+		for (const file of files) {
+			const f = TimelapseCaptureIntent.parseImageFilename (file);
+			if (f != null) {
+				times.push (f.time);
+			}
+		}
+		times.sort (sortCompare);
+
+		for (const t of times) {
+			if ((t >= mintime) && (t <= maxtime)) {
+				result.captureTimes.push (t);
+				if ((maxresults > 0) && (result.captureTimes.length >= maxresults)) {
 					break;
 				}
-				--i;
 			}
-			while (i >= 0) {
-				dirpaths.push (Path.join (cameraServer.cacheDataPath, `${cameraServer.captureDirectoryTimes[i]}`));
-				--i;
-			}
-
-			sortCompare = (a, b) => {
-				if (a < b) {
-					return (1);
-				}
-				if (a > b) {
-					return (-1);
-				}
-				return (0);
-			};
 		}
-		else {
-			i = 0;
-			while (i < (cameraServer.captureDirectoryTimes.length - 1)) {
-				if (cameraServer.captureDirectoryTimes[i] <= mintime) {
-					break;
-				}
-				++i;
-			}
-			while (i < cameraServer.captureDirectoryTimes.length) {
-				dirpaths.push (Path.join (cameraServer.cacheDataPath, `${cameraServer.captureDirectoryTimes[i]}`));
-				++i;
-			}
-
-			sortCompare = (a, b) => {
-				if (a < b) {
-					return (-1);
-				}
-				if (a > b) {
-					return (1);
-				}
-				return (0);
-			};
-		}
-
-		const readDirectory = (path, callback) => {
-			if ((cmdInv.params.maxResults > 0) && (result.captureTimes.length >= cmdInv.params.maxResults)) {
-				process.nextTick (callback);
-				return;
-			}
-			FsUtil.readDirectory (path, (err, files) => {
-				if (err != null) {
-					callback (err);
-					return;
-				}
-
-				const times = [ ];
-				for (const file of files) {
-					const f = TimelapseCaptureIntent.parseImageFilename (file);
-					if (f != null) {
-						times.push (f.time);
-					}
-				}
-				times.sort (sortCompare);
-
-				for (const t of times) {
-					if ((t >= mintime) && (t <= maxtime)) {
-						result.captureTimes.push (t);
-						if ((cmdInv.params.maxResults > 0) && (result.captureTimes.length >= cmdInv.params.maxResults)) {
-							break;
-						}
-					}
-				}
-
-				callback ();
-			});
-		};
-
-		const endSeries = (err) => {
-			if (err != null) {
-				reject (err);
-				return;
-			}
-			resolve (result);
-		};
-
-		Async.eachSeries (dirpaths, readDirectory, endSeries);
-	}));
+	}
+	return (result);
 };
 
 // Return a promise that finds the path for the cache image specified by the provided GetCaptureImage command, resolving with a non-empty path value if successful, or an empty path value for a file not found result
-TimelapseCaptureIntent.getCaptureImagePath = function (cmdInv, cameraServer) {
+TimelapseCaptureIntent.getCaptureImagePath = (cmdInv, cameraServer) => {
 	return (new Promise ((resolve, reject) => {
 		let dirtime;
 
