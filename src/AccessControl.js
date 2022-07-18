@@ -1,5 +1,5 @@
 /*
-* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
+* Copyright 2019-2022 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -71,20 +71,26 @@ class AccessControl {
 
 	// Create a new authorization session using the provided Authorize command and return a response command
 	authorize (cmdInv) {
+		if ((typeof cmdInv != "object") || (cmdInv == null)) {
+			return (SystemInterface.createCommand ({ }, SystemInterface.CommandId.CommandResult, {
+				success: false,
+				error: "Authorization failed"
+			}));
+		}
 		if (cmdInv.command != SystemInterface.CommandId.Authorize) {
-			return (SystemInterface.createCommand ({ }, "CommandResult", SystemInterface.Constant.DefaultCommandType, {
+			return (SystemInterface.createCommand ({ }, SystemInterface.CommandId.CommandResult, {
 				success: false,
 				error: "Authorization failed"
 			}));
 		}
 		if (typeof cmdInv.prefix[SystemInterface.Constant.AuthorizationHashPrefixField] != "string") {
-			return (SystemInterface.createCommand ({ }, "CommandResult", SystemInterface.Constant.DefaultCommandType, {
+			return (SystemInterface.createCommand ({ }, SystemInterface.CommandId.CommandResult, {
 				success: false,
 				error: "Authorization failed"
 			}));
 		}
 		if (cmdInv.params.token.length < App.AuthorizeTokenLength) {
-			return (SystemInterface.createCommand ({ }, "CommandResult", SystemInterface.Constant.DefaultCommandType, {
+			return (SystemInterface.createCommand ({ }, SystemInterface.CommandId.CommandResult, {
 				success: false,
 				error: "Authorization failed"
 			}));
@@ -100,14 +106,14 @@ class AccessControl {
 			}
 		);
 		if (auth != cmdInv.prefix[SystemInterface.Constant.AuthorizationHashPrefixField]) {
-			return (SystemInterface.createCommand ({ }, "CommandResult", SystemInterface.Constant.DefaultCommandType, {
+			return (SystemInterface.createCommand ({ }, SystemInterface.CommandId.CommandResult, {
 				success: false,
 				error: "Authorization failed"
 			}));
 		}
 
 		const token = this.createSession ();
-		return (SystemInterface.createCommand (App.systemAgent.getCommandPrefix (), "AuthorizeResult", SystemInterface.Constant.DefaultCommandType, {
+		return (SystemInterface.createCommand (App.systemAgent.getCommandPrefix (), SystemInterface.CommandId.AuthorizeResult, {
 			token: token
 		}));
 	}
@@ -167,10 +173,9 @@ class AccessControl {
 
 	// Set the sustained state for the session referenced by the provided token. If enabled, the session does not expire by timeout.
 	setSessionSustained (sessionToken, isSustained) {
-		if (typeof sessionToken != "string") {
+		if ((typeof sessionToken != "string") || (sessionToken == "")) {
 			return;
 		}
-
 		const session = this.sessionMap[sessionToken];
 		if (session == null) {
 			return;
@@ -185,7 +190,6 @@ class AccessControl {
 		if (session.sustainCount < 0) {
 			session.sustainCount = 0;
 		}
-
 		session.updateTime = Date.now ();
 	}
 }

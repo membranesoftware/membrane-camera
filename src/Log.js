@@ -1,5 +1,5 @@
 /*
-* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
+* Copyright 2019-2022 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -31,9 +31,8 @@
 
 "use strict";
 
-const App = global.App || { };
 const Fs = require ("fs");
-const Path = require ("path");
+const Os = require ("os");
 
 exports.ErrLevel = 0;
 exports.WarningLevel = 1;
@@ -49,8 +48,9 @@ exports.LevelCount = 9;
 const logLevelNames = [ "ERR", "WARNING", "NOTICE", "INFO", "DEBUG", "DEBUG1", "DEBUG2", "DEBUG3", "DEBUG4" ];
 let logLevel = exports.InfoLevel;
 let isConsoleOutputEnabled = false;
-let isFileOutputEnabled = true;
+let isFileOutputEnabled = false;
 let logFilename = "";
+let messageHostname = "";
 
 // Write a message to the log
 exports.write = (level, message) => {
@@ -65,14 +65,11 @@ exports.write = (level, message) => {
 	}
 
 	const now = new Date ();
-	const output = `[${exports.getDateString (now)}][${logLevelNames[level]}] ${message}`;
+	const output = `${messageHostname}[${exports.getDateString (now)}][${logLevelNames[level]}] ${message}`;
 	if (isConsoleOutputEnabled) {
 		console.log (output);
 	}
 	if (isFileOutputEnabled) {
-		if (logFilename == "") {
-			logFilename = Path.join (App.DATA_DIRECTORY, "main.log");
-		}
 		try {
 			Fs.appendFileSync (logFilename, `${output}\n`, { "mode" : 0o644 });
 		}
@@ -144,15 +141,24 @@ exports.setConsoleOutput = (enable) => {
 	isConsoleOutputEnabled = enable;
 };
 
-// Set the state of the log's file output option. If enabled, log messages are written to a file.
-exports.setFileOutput = (enable) => {
-	isFileOutputEnabled = enable;
+// Set the state of the log's file output option. If enable is true and outputFilename is a non-empty string, log messages are written to outputFilename.
+exports.setFileOutput = (enable, outputFilename) => {
+	if (enable && (typeof outputFilename == "string") && (outputFilename.length > 0)) {
+		isFileOutputEnabled = true;
+		logFilename = outputFilename;
+	}
+	else {
+		isFileOutputEnabled = false;
+	}
 };
 
-// Set the output filename for the log
-exports.setLogFilename = (filename) => {
-	if (typeof filename == "string") {
-		logFilename = filename;
+// Set the state of the log's message hostname option. If enabled, log messages include the system hostname.
+exports.setMessageHostname = (enable) => {
+	if (enable) {
+		messageHostname = `[${Os.hostname ()}]`;
+	}
+	else {
+		messageHostname = "";
 	}
 };
 
@@ -199,22 +205,20 @@ exports.setLevel = (level) => {
 	if ((typeof level != "number") || (level < 0) || (level >= exports.LevelCount)) {
 		return;
 	}
-
 	logLevel = Math.floor (level);
 };
 
 // Set the log level using the provided name. Returns true if the name was recognized, or false if not.
 exports.setLevelByName = (levelName) => {
-	let i, result;
+	let result;
 
 	result = false;
-	for (i = 0; i < logLevelNames.length; ++i) {
+	for (let i = 0; i < logLevelNames.length; ++i) {
 		if (logLevelNames[i] == levelName) {
 			logLevel = i;
 			result = true;
 			break;
 		}
 	}
-
 	return (result);
 };

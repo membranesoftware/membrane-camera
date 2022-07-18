@@ -1,5 +1,5 @@
 /*
-* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
+* Copyright 2019-2022 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -103,7 +103,6 @@ class Ipv4Address {
 		if ((! this.isValid) || (this.netmaskOctets.length != 4)) {
 			return ("");
 		}
-
 		const addr = [ ];
 		for (let i = 0; i < 4; ++i) {
 			num = this.octets[i];
@@ -115,7 +114,6 @@ class Ipv4Address {
 			num >>>= 0;
 			addr.push (num);
 		}
-
 		return (addr.join ("."));
 	}
 
@@ -124,11 +122,9 @@ class Ipv4Address {
 		if (! this.isValid) {
 			return (false);
 		}
-
 		if ((this.octets[0] == 127) && (this.octets[1] == 0) && (this.octets[2] == 0) && (this.octets[3] == 1)) {
 			return (true);
 		}
-
 		return (false);
 	}
 }

@@ -1,5 +1,5 @@
 /*
-* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
+* Copyright 2019-2022 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -27,21 +27,28 @@
 * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 * POSSIBILITY OF SUCH DAMAGE.
 */
-// Utility functions for program logic
-
 "use strict";
 
-// Return an item from a map, or undefined if the item wasn't found. If createFn is a function that returns an object, use it to create a new map item for any nonexistent key.
-exports.getMapItem = (map, key, createFn) => {
-	let item;
+const App = global.App || { };
+const Path = require ("path");
+const Task = require (Path.join (App.SOURCE_DIRECTORY, "Task", "Task"));
 
-	item = map[key];
-	if (item === undefined) {
-		if (typeof createFn == "function") {
-			item = createFn ();
-			map[key] = item;
-		}
+class ExecuteTask extends Task {
+	constructor (configureMap) {
+		super (configureMap);
 	}
 
-	return (item);
-};
+	async run () {
+		if (typeof this.configureMap.run == "function") {
+			await this.configureMap.run ();
+		}
+		this.isSuccess = true;
+	}
+
+	async end () {
+		if (typeof this.configureMap.end == "function") {
+			await this.configureMap.end ();
+		}
+	}
+}
+module.exports = ExecuteTask;

@@ -1,5 +1,5 @@
 /*
-* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
+* Copyright 2019-2022 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -52,50 +52,71 @@ class IntentGroup {
 
 	// Start the intent group's operation
 	start () {
-		let intent, data;
+		let intent, clear, configlines;
 
-		const state = App.systemAgent.runState.intentState;
-		if ((typeof state == "object") && (state != null)) {
-			for (const item of Object.values (state)) {
-				intent = Intent.createIntent (item.name);
-				if (intent == null) {
-					Log.err (`Failed to read intent state record; err=Unknown type ${item.name}`);
+		clear = false;
+		configlines = [ ];
+		if (FsUtil.fileExistsSync (Path.join (App.CONF_DIRECTORY, "intent.conf"))) {
+			try {
+				const data = Fs.readFileSync (Path.join (App.CONF_DIRECTORY, "intent.conf"), { encoding: "UTF8" }).toString ();
+				for (const line of data.split ("\n")) {
+					if (line.match (/^\s*#\s*clear-all\s*$/i)) {
+						clear = true;
+						continue;
+					}
+					if (line.match (/^\s*#/) || line.match (/^\s*$/)) {
+						continue;
+					}
+					configlines.push (line.trim ());
 				}
-				else {
-					intent.readIntentState (item);
-					this.intentMap[intent.id] = intent;
-					if (intent.isActive) {
-						intent.start ();
+			}
+			catch (err) {
+				Log.err (`Failed to read configuration file; path=${Path.join (App.CONF_DIRECTORY, "intent.conf")} err=${err}`);
+				configlines = [ ];
+			}
+		}
+
+		if (clear) {
+			Log.debug ("Clear state intents (clear-all configuration line)");
+			App.systemAgent.updateRunState ({ intentState: { } });
+		}
+		else {
+			const state = App.systemAgent.runState.intentState;
+			if ((typeof state == "object") && (state != null)) {
+				for (const item of Object.values (state)) {
+					try {
+						intent = Intent.createIntent (item.name);
+					}
+					catch (err) {
+						Log.err (`Failed to read intent state record; err=${err}`);
+						intent = null;
+					}
+					if (intent != null) {
+						intent.readIntentState (item);
+						Log.debug (`Create run state intent; ${intent.toString ()}`);
+						this.intentMap[intent.id] = intent;
+						if (intent.isActive) {
+							intent.start ();
+						}
 					}
 				}
 			}
 		}
 
-		if ((Object.values (this.intentMap).length <= 0) && FsUtil.fileExistsSync (Path.join (App.CONF_DIRECTORY, "intent.conf"))) {
-			try {
-				data = Fs.readFileSync (Path.join (App.CONF_DIRECTORY, "intent.conf"), { encoding: "UTF8" });
-				data = data.toString ();
-			}
-			catch (e) {
-				Log.err (`Failed to read configuration file; path=${Path.join (App.CONF_DIRECTORY, "intent.conf")} err=${e}`);
-				data = null;
-			}
-
-			if (data != null) {
-				const lines = data.split ("\n");
-				for (let line of lines) {
-					line = line.trim ();
-					if (line.match (/^\s*#/) || line.match (/^\s*$/)) {
-						continue;
-					}
-
+		if (Object.values (this.intentMap).length <= 0) {
+			for (const line of configlines) {
+				try {
 					intent = Intent.createIntentFromCommand (line);
-					if (intent != null) {
-						intent.assignId ();
-						this.intentMap[intent.id] = intent;
-						Log.debug (`Create configuration intent; ${intent.toString ()}`);
-						intent.start ();
-					}
+				}
+				catch (err) {
+					Log.err (`Failed to create configuration intent; err=${err}`);
+					intent = null;
+				}
+				if (intent != null) {
+					intent.assignId ();
+					this.intentMap[intent.id] = intent;
+					Log.debug (`Create configuration intent; ${intent.toString ()}`);
+					intent.start ();
 				}
 			}
 		}
@@ -210,7 +231,6 @@ class IntentGroup {
 
 			a.push (intent);
 		}
-
 		return (a);
 	}
 
@@ -224,7 +244,6 @@ class IntentGroup {
 				++count;
 			}
 		}
-
 		return (count);
 	}
 }

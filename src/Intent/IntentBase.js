@@ -1,5 +1,5 @@
 /*
-* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
+* Copyright 2019-2022 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -33,11 +33,9 @@
 
 const App = global.App || { };
 const Path = require ("path");
-const UuidV4 = require ("uuid/v4");
-const Result = require (Path.join (App.SOURCE_DIRECTORY, "Result"));
+const Uuid = require ("uuid");
 const Log = require (Path.join (App.SOURCE_DIRECTORY, "Log"));
 const SystemInterface = require (Path.join (App.SOURCE_DIRECTORY, "SystemInterface"));
-const Prng = require (Path.join (App.SOURCE_DIRECTORY, "Prng"));
 
 class IntentBase {
 	constructor () {
@@ -54,34 +52,34 @@ class IntentBase {
 		this.updateTime = 0;
 		this.statusMap = { };
 		this.conditionMap = { };
-
-		this.prng = new Prng ();
+		this.stage = "";
+		this.stagePromise = null;
+		this.stagePromiseResult = null;
+		this.stagePromiseError = null;
 	}
 
-	// Configure the intent's state using values in the provided params object. Returns a Result value.
+	// Configure the intent's state using values in the provided params object
 	configure (configParams) {
 		if (typeof configParams.displayName == "string") {
 			this.displayName = configParams.displayName;
 		}
-		return (this.doConfigure (configParams));
+		this.doConfigure (configParams);
 	}
 
-	// Configure the intent's state using values in the provided params object and return a Result value. Subclasses are expected to implement this method.
+	// Configure the intent's subclass-specific state using values in the provided params object
 	doConfigure (configParams) {
 		// Default implementation does nothing
-		return (Result.Success);
 	}
 
-	// Configure the intent's state using the provided command and return a Result value.
+	// Configure the intent's state using the provided command
 	configureFromCommand (cmdInv) {
 		if (this.configureCommandId < 0) {
-			return (Result.UnknownTypeError);
+			throw Error ("Configure by command not available");
 		}
 		if (cmdInv.command != this.configureCommandId) {
-			return (Result.InvalidParamsError);
+			throw Error ("Incorrect command type");
 		}
-
-		return (this.configure (cmdInv.params));
+		this.configure (cmdInv.params);
 	}
 
 	// Return a string description of the intent
@@ -165,7 +163,7 @@ class IntentBase {
 	// If the intent holds an empty ID value, assign a new one
 	assignId () {
 		if (this.id == "00000000-0000-0000-0000-000000000000") {
-			this.id = UuidV4 ();
+			this.id = Uuid.v4 ();
 		}
 	}
 
@@ -186,50 +184,89 @@ class IntentBase {
 		return (this.conditionMap[conditionName] === this.id);
 	}
 
-	// Perform actions appropriate for the current state of the application
+	// Execute actions appropriate for the current state of the application
 	update () {
 		if (! this.isActive) {
 			return;
 		}
-
 		this.doUpdate ();
+		if ((this.stage != "") && (this.stagePromise == null)) {
+			this[this.stage] ();
+		}
 	}
 
-	// Perform subclass-specific actions appropriate for the current state of the application
+	// Execute subclass-specific actions appropriate for the current state of the application
 	doUpdate () {
 		// Default implementation does nothing
 	}
 
-	// Perform actions appropriate when the intent becomes active
+	// Execute actions appropriate when the intent becomes active
 	start () {
-		// Superclass method takes no action
+		this.stage = "";
 		this.doStart ();
 	}
 
-	// Perform subclass-specific actions appropriate when the intent becomes active. Subclasses are expected to implement this method if needed.
+	// Execute subclass-specific actions appropriate when the intent becomes active. Subclasses are expected to implement this method if needed.
 	doStart () {
 		// Default implementation does nothing
 	}
 
-	// Perform actions appropriate when the intent becomes inactive
+	// Execute actions appropriate when the intent becomes inactive
 	stop () {
-		// Superclass method takes no action
+		this.clearStage ();
 		this.doStop ();
 	}
 
-	// Perform subclass-specific actions appropriate when the intent becomes inactive. Subclasses are expected to implement this method if needed.
+	// Execute subclass-specific actions appropriate when the intent becomes inactive. Subclasses are expected to implement this method if needed.
 	doStop () {
 		// Default implementation does nothing
 	}
 
-	// Return an object containing a command with the default agent prefix and the provided parameters, or null if the command could not be validated, in which case an error log message is generated
-	createCommand (commandName, commandType, commandParams) {
-		const cmd = SystemInterface.createCommand (App.systemAgent.getCommandPrefix (), commandName, commandType, commandParams);
-		if (SystemInterface.isError (cmd)) {
-			return (null);
+	setStage (stage) {
+		if (stage === this.stage) {
+			return;
 		}
+		if (typeof this[stage] !== "function") {
+			Log.err (`${this.toString ()} setStage failed, unknown stage name; stage=${stage}`);
+			return;
+		}
+		this.statusMap.stage = stage;
+		this.stage = stage;
+		this.stagePromise = null;
+		this[this.stage] ();
+	}
 
-		return (cmd);
+	clearStage () {
+		this.stage = "";
+		this.stagePromise = null;
+		this.stagePromiseResult = null;
+		this.stagePromiseError = null;
+		delete this.statusMap.stage;
+	}
+
+	// Suspend stage processing until promise completes, then set the stage to nextStage
+	stageAwait (promise, nextStage) {
+		this.stagePromise = promise;
+		this.stagePromiseResult = null;
+		this.stagePromiseError = null;
+		promise.then ((result) => {
+			if (this.stagePromise == promise) {
+				this.stagePromiseResult = result;
+				this.setStage (nextStage);
+			}
+		}).catch ((err) => {
+			if (this.stagePromise == promise) {
+				this.stagePromiseError = err;
+				this.setStage (nextStage);
+			}
+		});
+	}
+
+	// Return a promise that resolves after a millisecond duration elapses
+	timeoutWait (duration) {
+		return (new Promise ((resolve, reject) => {
+			setTimeout (resolve, duration);
+		}));
 	}
 
 	// Return a boolean value indicating if the specified time period has elapsed, relative to the intent's update time. startTime and period are both measured in milliseconds.
@@ -238,49 +275,17 @@ class IntentBase {
 		return (diff >= period);
 	}
 
-	// Return a boolean value indicating if the provided item is an object and is not null
-	isObject (obj) {
-		return ((typeof obj == "object") && (obj != null));
-	}
-
 	// Return a boolean value indicating if the provided item is an array with no contents other than strings
 	isStringArray (obj) {
 		if (! Array.isArray (obj)) {
 			return (false);
 		}
-
 		for (const i of obj) {
 			if (typeof i != "string") {
 				return (false);
 			}
 		}
-
 		return (true);
-	}
-
-	// Suspend all items in the provided map of RepeatTasks items
-	suspendTasks (taskMap) {
-		for (const i in taskMap) {
-			const task = taskMap[i];
-			task.suspendRepeat ();
-		}
-	}
-
-	// Resume all items in the provided map of RepeatTasks items
-	resumeTasks (taskMap) {
-		for (const i in taskMap) {
-			const task = taskMap[i];
-			task.setNextRepeat (0);
-		}
-	}
-
-	// Return a newly created array with the same contents as the provided source array
-	copyArray (sourceArray) {
-		const a = [ ];
-		for (let i = 0; i < sourceArray.length; ++i) {
-			a.push (sourceArray[i]);
-		}
-		return (a);
 	}
 
 	// Choose the next sequential item from itemArray. To track the chosen item, update choiceArray (expected to be an empty array for the first call). Returns the chosen item, or null if no items were available.
@@ -299,7 +304,6 @@ class IntentBase {
 		if (choiceArray.length <= 0) {
 			this.populateChoiceArray (choiceArray, itemArray.length);
 		}
-
 		return (result);
 	}
 
@@ -309,7 +313,7 @@ class IntentBase {
 			return (null);
 		}
 		if (! Array.isArray (choiceArray)) {
-			return (itemArray[this.prng.getRandomInteger (0, itemArray.length - 1)]);
+			return (itemArray[App.systemAgent.getRandomInteger (0, itemArray.length - 1)]);
 		}
 
 		if (choiceArray.length <= 0) {
@@ -320,7 +324,6 @@ class IntentBase {
 		if (choiceArray.length <= 0) {
 			this.populateChoiceArray (choiceArray, itemArray.length, true, index);
 		}
-
 		return (result);
 	}
 
@@ -341,7 +344,7 @@ class IntentBase {
 		}
 		for (let i = 0; i < choiceCount; ++i) {
 			while (true) {
-				pos = this.prng.getRandomInteger (0, choices.length - 1);
+				pos = App.systemAgent.getRandomInteger (0, choices.length - 1);
 				if (typeof firstExcludeChoice == "number") {
 					if ((i == 0) && (choiceCount > 1) && (choices[pos] == firstExcludeChoice)) {
 						continue;

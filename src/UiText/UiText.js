@@ -1,5 +1,5 @@
 /*
-* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
+* Copyright 2019-2022 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -81,6 +81,102 @@ class UiText {
 	getText (key) {
 		const s = this.strings[key];
 		return ((typeof s == "string") ? s : "");
+	}
+
+	// Return a string representation of the provided timestamp or Date object, or an empty string if the display time could not be generated. If isDateOnly is true, use a string format that includes the date but not the time.
+	getDateString (time, isDateOnly) {
+		let month, day, hour, minute, second;
+
+		if ((time === null) || (time === undefined)) {
+			return ("");
+		}
+		if (typeof time == "number") {
+			if (time < 0) {
+				return ("");
+			}
+			time = new Date (time);
+		}
+		if (typeof time.getUTCFullYear != "function") {
+			return ("");
+		}
+		const year = `${time.getUTCFullYear ()}`;
+		switch (time.getUTCMonth ()) {
+			case 0: {
+				month = this.getText ("Month1Abbreviation");
+				break;
+			}
+			case 1: {
+				month = this.getText ("Month2Abbreviation");
+				break;
+			}
+			case 2: {
+				month = this.getText ("Month3Abbreviation");
+				break;
+			}
+			case 3: {
+				month = this.getText ("Month4Abbreviation");
+				break;
+			}
+			case 4: {
+				month = this.getText ("Month5Abbreviation");
+				break;
+			}
+			case 5: {
+				month = this.getText ("Month6Abbreviation");
+				break;
+			}
+			case 6: {
+				month = this.getText ("Month7Abbreviation");
+				break;
+			}
+			case 7: {
+				month = this.getText ("Month8Abbreviation");
+				break;
+			}
+			case 8: {
+				month = this.getText ("Month9Abbreviation");
+				break;
+			}
+			case 9: {
+				month = this.getText ("Month10Abbreviation");
+				break;
+			}
+			case 10: {
+				month = this.getText ("Month11Abbreviation");
+				break;
+			}
+			case 11: {
+				month = this.getText ("Month12Abbreviation");
+				break;
+			}
+			default: {
+				month = `${(time.getUTCMonth () + 1)}`;
+				if (month.length < 2) {
+					month = `0${month}`;
+				}
+				break;
+			}
+		}
+		day = `${time.getUTCDate ()}`;
+		if (day.length < 2) {
+			day = `0${day}`;
+		}
+		if (isDateOnly === true) {
+			return (`${year} ${month} ${day}`);
+		}
+		hour = `${time.getUTCHours ()}`;
+		if (hour.length < 2) {
+			hour = `0${hour}`;
+		}
+		minute = `${time.getUTCMinutes ()}`;
+		if (minute.length < 2) {
+			minute = `0${minute}`;
+		}
+		second = `${time.getUTCSeconds ()}`;
+		if (second.length < 2) {
+			second = `0${second}`;
+		}
+		return (`${year} ${month} ${day} ${hour}:${minute}:${second}`);
 	}
 }
 module.exports = UiText;

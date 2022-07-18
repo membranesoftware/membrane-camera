@@ -1,5 +1,5 @@
 /*
-* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
+* Copyright 2019-2022 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -27,14 +27,13 @@
 * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 * POSSIBILITY OF SUCH DAMAGE.
 */
-// Main execution method
-
 "use strict";
 
 const App = require ("./App");
 const Path = require ("path");
 const Log = require (Path.join (App.SOURCE_DIRECTORY, "Log"));
 const FsUtil = require (Path.join (App.SOURCE_DIRECTORY, "FsUtil"));
+const OsUtil = require (Path.join (App.SOURCE_DIRECTORY, "OsUtil"));
 const SystemAgent = require (Path.join (App.SOURCE_DIRECTORY, "SystemAgent"));
 const SystemInterface = require (Path.join (App.SOURCE_DIRECTORY, "SystemInterface"));
 const UiText = require (Path.join (App.SOURCE_DIRECTORY, "UiText", "UiText"));
@@ -136,6 +135,13 @@ const configParams = [
 		defaultValue: 60
 	},
 	{
+		name: "InvokeServerName",
+		type: "string",
+		flags: SystemInterface.ParamFlag.Required,
+		description: "The server name value that should be used for agent invocations",
+		defaultValue: ""
+	},
+	{
 		name: "Hostname",
 		type: "string",
 		flags: SystemInterface.ParamFlag.Required | SystemInterface.ParamFlag.Hostname,
@@ -176,46 +182,12 @@ const configParams = [
 		flags: SystemInterface.ParamFlag.Required,
 		description: "The path for the openssl executable. An empty value specifies that the agent's included openssl binary should be used.",
 		defaultValue: ""
-	},
-	{
-		name: "MongodPath",
-		type: "string",
-		flags: SystemInterface.ParamFlag.Required,
-		description: "The path for the mongod executable. An empty value specifies that the agent's included mongod binary should be used.",
-		defaultValue: "/usr/bin/mongod"
-	},
-	{
-		name: "StorePort",
-		type: "number",
-		flags: SystemInterface.ParamFlag.Required | SystemInterface.ParamFlag.RangedNumber,
-		rangeMin: 1,
-		rangeMax: 65535,
-		description: "The TCP port to use for the data store listener",
-		defaultValue: 27017
-	},
-	{
-		name: "StoreDatabase",
-		type: "string",
-		flags: SystemInterface.ParamFlag.Required | SystemInterface.ParamFlag.NotEmpty,
-		description: "The database name to use for the data store",
-		defaultValue: "membrane"
-	},
-	{
-		name: "StoreCollection",
-		type: "string",
-		flags: SystemInterface.ParamFlag.Required | SystemInterface.ParamFlag.NotEmpty,
-		description: "The collection name to use for the data store",
-		defaultValue: "records"
-	},
-	{
-		name: "StoreRunPeriod",
-		type: "number",
-		flags: SystemInterface.ParamFlag.Required | SystemInterface.ParamFlag.GreaterThanZero,
-		description: "The interval to use for periodically relaunching the data store process if it isn't running, in seconds",
-		defaultValue: 60
 	}
 ];
 
+if (typeof process.env.LOG_MESSAGE_HOSTNAME == "string") {
+	Log.setMessageHostname (true);
+}
 skiploglevel = false;
 if (typeof process.env.LOG_LEVEL == "string") {
 	if (Log.setLevelByName (process.env.LOG_LEVEL)) {
@@ -225,15 +197,23 @@ if (typeof process.env.LOG_LEVEL == "string") {
 if (typeof process.env.LOG_CONSOLE == "string") {
 	Log.setConsoleOutput (true);
 }
+
 if (typeof process.env.DATA_DIRECTORY == "string") {
 	App.DATA_DIRECTORY = process.env.DATA_DIRECTORY;
 }
+else {
+	if (OsUtil.isWindows && (typeof process.env.LOCALAPPDATA == "string")) {
+		App.DATA_DIRECTORY = Path.join (process.env.LOCALAPPDATA, App.APPLICATION_NAME);
+	}
+}
+
 if (typeof process.env.BIN_DIRECTORY == "string") {
 	App.BIN_DIRECTORY = process.env.BIN_DIRECTORY;
 }
 if (typeof process.env.CONF_DIRECTORY == "string") {
 	App.CONF_DIRECTORY = process.env.CONF_DIRECTORY;
 }
+Log.setFileOutput (true, (typeof process.env.LOG_FILENAME == "string") ? process.env.LOG_FILENAME : Path.join (App.DATA_DIRECTORY, "main.log"));
 
 fields = null;
 const conf = FsUtil.readConfigKeyFile (App.CONFIG_FILE);
@@ -267,14 +247,29 @@ if (conf != null) {
 	App.AuthorizePath = fields.AuthorizePath;
 	App.AuthorizeSecret = fields.AuthorizeSecret;
 	App.AuthorizeSessionDuration = fields.AuthorizeSessionDuration * 1000;
+	App.InvokeServerName = fields.InvokeServerName;
 	App.MaxTaskCount = fields.MaxTaskCount;
 	App.OpensslPath = fields.OpensslPath;
-	App.MongodPath = fields.MongodPath;
-	App.StorePort = fields.StorePort;
-	App.StoreDatabase = fields.StoreDatabase;
-	App.StoreCollection = fields.StoreCollection;
-	App.StoreRunPeriod = fields.StoreRunPeriod;
 	App.Language = fields.Language;
+}
+
+if (typeof process.env.EXT_TCP_PORT1 == "string") {
+	const n = parseInt (process.env.EXT_TCP_PORT1, 10);
+	if ((! isNaN (n)) && (n >= 1) && (n <= 65535)) {
+		App.ExtTcpPort1 = n;
+	}
+}
+if (typeof process.env.EXT_TCP_PORT2 == "string") {
+	const n = parseInt (process.env.EXT_TCP_PORT2, 10);
+	if ((! isNaN (n)) && (n >= 1) && (n <= 65535)) {
+		App.ExtTcpPort2 = n;
+	}
+}
+if (typeof process.env.EXT_UDP_PORT == "string") {
+	const n = parseInt (process.env.EXT_UDP_PORT, 10);
+	if ((! isNaN (n)) && (n >= 1) && (n <= 65535)) {
+		App.ExtUdpPort = n;
+	}
 }
 
 // TODO: Check for an environment value specifying text language
@@ -286,7 +281,6 @@ App.systemAgent.start ((err) => {
 		Log.err (`Failed to start Membrane Server; err=${err}`);
 		process.exit (1);
 	}
-
 	Log.info (`${App.AgentApplicationName} started; version=${App.VERSION} agentId=${App.systemAgent.agentId}`);
 	Log.notice (`${App.AgentApplicationName} ${App.uiText.getText ("AppStartMessage")}`);
 });

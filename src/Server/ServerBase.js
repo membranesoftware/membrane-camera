@@ -1,5 +1,5 @@
 /*
-* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
+* Copyright 2019-2022 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -34,6 +34,7 @@
 const App = global.App || { };
 const Path = require ("path");
 const Log = require (Path.join (App.SOURCE_DIRECTORY, "Log"));
+const StringUtil = require (Path.join (App.SOURCE_DIRECTORY, "StringUtil"));
 const SystemInterface = require (Path.join (App.SOURCE_DIRECTORY, "SystemInterface"));
 
 class ServerBase {
@@ -79,7 +80,7 @@ class ServerBase {
 
 		const fields = this.parseConfiguration (configParams);
 		if (SystemInterface.isError (fields)) {
-			Log.err (`${this.toString ()} configuration parse error; err=${fields}`);
+			Log.err (`${this.name} configuration parse error; err=${fields}`);
 			return;
 		}
 
@@ -105,7 +106,6 @@ class ServerBase {
 				c[i] = configParams[i];
 			}
 		}
-
 		return (SystemInterface.parseFields (this.configureParams, c));
 	}
 
@@ -114,39 +114,46 @@ class ServerBase {
 		return (! SystemInterface.isError (this.parseConfiguration (configParams)));
 	}
 
-	// Start the server's operation and invoke the provided callback when complete, with an "err" parameter (non-null if an error occurred). If the start operation succeeds, isRunning is set to true.
+	// Start the server's operation and invoke startCallback (err) when complete. If the start operation succeeds, isRunning is set to true.
 	start (startCallback) {
+		let starterror;
+
 		if (! this.isConfigured) {
-			process.nextTick (function () {
+			process.nextTick (() => {
 				startCallback ("Invalid configuration");
 			});
 			return;
 		}
 
-		this.doStart ((err) => {
-			if (err == null) {
+		starterror = undefined;
+		this.doStart ().catch ((err) => {
+			starterror = err;
+		}).then (() => {
+			if (starterror === undefined) {
 				this.isRunning = true;
 			}
-			startCallback (err);
+			startCallback (starterror);
 		});
 	}
 
-	// Execute subclass-specific start operations and invoke the provided callback when complete, with an "err" parameter (non-null if an error occurred)
-	doStart (startCallback) {
+	// Execute subclass-specific start operations
+	async doStart () {
 		// Default implementation does nothing
-		process.nextTick (startCallback);
 	}
 
-	// Stop the server's operation and set isRunning to false, and invoke the provided callback when complete
+	// Stop the server's operation, set isRunning to false, and invoke stopCallback when complete
 	stop (stopCallback) {
 		this.isRunning = false;
-		this.doStop (stopCallback);
+		this.doStop ().catch ((err) => {
+			Log.debug (`${this.name} doStop failed; err=${err}`);
+		}).then (() => {
+			stopCallback ();
+		});
 	}
 
-	// Execute subclass-specific stop operations and invoke the provided callback when complete
-	doStop (stopCallback) {
+	// Execute subclass-specific stop operations
+	async doStop () {
 		// Default implementation does nothing
-		process.nextTick (stopCallback);
 	}
 
 	// Return a command invocation containing the server's status, or null if the server is not active
@@ -204,14 +211,75 @@ class ServerBase {
 		// Default implementation does nothing
 	}
 
-	// Return an object containing a command with the default agent prefix and the provided parameters, or null if the command could not be validated, in which case an error log message is generated
-	createCommand (commandName, commandType, commandParams) {
-		const cmd = SystemInterface.createCommand (App.systemAgent.getCommandPrefix (), commandName, commandType, commandParams);
-		if (SystemInterface.isError (cmd)) {
-			Log.err (`${this.toString ()} failed to create command invocation; commandName=${commandName} err=${cmd}`);
-			return (null);
+	// Set an invocation handler for the specified path and command ID, using the server's async method with the matching command name as the handler function
+	addInvokeRequestHandler (invokePath, commandId) {
+		const cmdname = SystemInterface.getCommandName (commandId);
+		if (cmdname == "") {
+			throw Error (`Unknown command ID ${commandId}`);
 		}
-		return (cmd);
+		const methodname = StringUtil.uncapitalized (cmdname);
+		if (typeof this[methodname] != "function") {
+			throw Error (`Missing ${this.name} command handler for ${cmdname}`);
+		}
+		App.systemAgent.addInvokeRequestHandler (invokePath, commandId, (cmdInv, request, response) => {
+			const token = cmdInv.prefix[SystemInterface.Constant.AuthorizationTokenPrefixField];
+			if (token !== undefined) {
+				App.systemAgent.accessControl.setSessionSustained (token, true);
+			}
+
+			this[methodname] (cmdInv, request, response).catch ((err) => {
+				Log.err (`${this.name} ${cmdname} command failed; err=${err}`);
+				App.systemAgent.writeResponse (request, response, 500);
+			}).then (() => {
+				if (token !== undefined) {
+					App.systemAgent.accessControl.setSessionSustained (token, false);
+				}
+			});
+		});
+	}
+
+	// Set a secondary invocation handler for the specified path and command ID, using the server's async method with the matching command name as the handler function
+	addSecondaryInvokeRequestHandler (invokePath, commandId) {
+		const cmdname = SystemInterface.getCommandName (commandId);
+		if (cmdname == "") {
+			throw Error (`Unknown command ID ${commandId}`);
+		}
+		const methodname = StringUtil.uncapitalized (cmdname);
+		if (typeof this[methodname] != "function") {
+			throw Error (`Missing ${this.name} command handler for ${cmdname}`);
+		}
+		App.systemAgent.addSecondaryInvokeRequestHandler (invokePath, commandId, (cmdInv, request, response) => {
+			const token = cmdInv.prefix[SystemInterface.Constant.AuthorizationTokenPrefixField];
+			if (token !== undefined) {
+				App.systemAgent.accessControl.setSessionSustained (token, true);
+			}
+
+			this[methodname] (cmdInv, request, response).catch ((err) => {
+				Log.err (`${this.name} ${cmdname} command failed; err=${err}`);
+				App.systemAgent.writeResponse (request, response, 500);
+			}).then (() => {
+				if (token !== undefined) {
+					App.systemAgent.accessControl.setSessionSustained (token, false);
+				}
+			});
+		});
+	}
+
+	// Set a link command handler for the specified command ID, using the server's async method with the matching command name as the handler function
+	addLinkCommandHandler (commandId) {
+		const cmdname = SystemInterface.getCommandName (commandId);
+		if (cmdname == "") {
+			throw Error (`Unknown command ID ${commandId}`);
+		}
+		const methodname = StringUtil.uncapitalized (cmdname);
+		if (typeof this[methodname] != "function") {
+			throw Error (`Missing ${this.name} command handler for ${cmdname}`);
+		}
+		App.systemAgent.addLinkCommandHandler (commandId, (cmdInv, client) => {
+			this[methodname] (cmdInv, client).catch ((err) => {
+				Log.err (`${this.name} ${cmdname} command failed; err=${err}`);
+			});
+		});
 	}
 }
 module.exports = ServerBase;

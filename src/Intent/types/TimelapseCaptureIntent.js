@@ -1,5 +1,5 @@
 /*
-* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
+* Copyright 2019-2022 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -32,26 +32,34 @@
 const App = global.App || { };
 const Fs = require ("fs");
 const Path = require ("path");
-const EventEmitter = require ("events").EventEmitter;
-const Result = require (Path.join (App.SOURCE_DIRECTORY, "Result"));
 const Log = require (Path.join (App.SOURCE_DIRECTORY, "Log"));
 const FsUtil = require (Path.join (App.SOURCE_DIRECTORY, "FsUtil"));
+const OsUtil = require (Path.join (App.SOURCE_DIRECTORY, "OsUtil"));
 const SystemInterface = require (Path.join (App.SOURCE_DIRECTORY, "SystemInterface"));
-const Task = require (Path.join (App.SOURCE_DIRECTORY, "Task", "Task"));
+const ExecProcess = require (Path.join (App.SOURCE_DIRECTORY, "ExecProcess"));
+const ExecuteTask = require (Path.join (App.SOURCE_DIRECTORY, "Task", "ExecuteTask"));
+const GetDiskSpaceTask = require (Path.join (App.SOURCE_DIRECTORY, "Task", "GetDiskSpaceTask"));
 const IntentBase = require (Path.join (App.SOURCE_DIRECTORY, "Intent", "IntentBase"));
 
 const RaspistillProcessName = "/usr/bin/raspistill";
+const LibcamerastillProcessName = "/usr/bin/libcamera-still";
 const SyncProcessName = "/bin/sync";
-const KillallProcessName = "/usr/bin/killall";
 const RebootProcessName = "reboot";
 const MaxImageWidth = 3280;
 const MaxImageHeight = 2464;
 const MaxCaptureDirectoryCount = 4096;
 const PruneTriggerPercent = 98; // Percent of total storage space used
 const PruneTargetPercent = 96; // Percent of total storage space used
-const RaspistillKillTimeout = 128000; // ms
+const CaptureKillTimeout = 128000; // ms
 const KillRebootThreshold = 2;
-const CaptureIdleEventName = "captureIdle";
+
+// Stage names
+const Initializing = "initializing";
+const Initializing2 = "initializing2";
+const Initializing3 = "initializing3";
+const Resting = "resting";
+const Resting2 = "resting2";
+const CaptureEnd = "captureEnd";
 
 class TimelapseCaptureIntent extends IntentBase {
 	constructor () {
@@ -60,42 +68,44 @@ class TimelapseCaptureIntent extends IntentBase {
 		this.displayName = "Capture timelapse images";
 		this.stateType = "TimelapseCaptureIntentState";
 
+		this.server = null;
+		this.serverSensor = { };
 		this.captureDirectoryTimes = [ ];
 		this.lastCaptureFile = "";
 		this.lastCaptureTime = 0;
 		this.lastCaptureWidth = 0;
 		this.lastCaptureHeight = 0;
-
-		this.isCaptureReady = false;
-		this.isScanningDirectory = false;
 		this.isCapturing = false;
 		this.killTime = 0;
 		this.killCount = 0;
 		this.capturePath = "";
 		this.capturePathCount = 0;
-		this.eventEmitter = new EventEmitter ();
-		this.eventEmitter.setMaxListeners (0);
-	}
-
-	// Schedule a callback to be invoked once, on the next occasion when the intent is not actively capturing an image
-	onCaptureIdle (callback) {
-		if (! this.isCapturing) {
-			callback ();
-		}
-		else {
-			this.eventEmitter.once (CaptureIdleEventName, callback);
+		this.captureProcess = null;
+		this.captureProcessName = LibcamerastillProcessName;
+		if (OsUtil.isRaspiosBuster) {
+			this.captureProcessName = RaspistillProcessName;
 		}
 	}
 
-	// Configure the intent's state using values in the provided params object and return a Result value
+	// Configure the intent's state using values in the provided params object
 	doConfigure (configParams) {
+		this.state.sensor = configParams.sensor;
 		this.state.capturePeriod = configParams.capturePeriod;
-
-		return (Result.Success);
 	}
 
-	// Perform actions appropriate when the intent becomes active
+	// Execute actions appropriate when the intent becomes active
 	doStart () {
+		this.server = App.systemAgent.getServer ("CameraServer");
+		if (this.server == null) {
+			Log.err (`${this.toString ()} CameraServer not found, image capture will not execute`);
+		}
+
+		if (typeof this.state.sensor != "number") {
+			this.state.sensor = 0;
+		}
+		if (typeof this.state.capturePeriod != "number") {
+			this.state.capturePeriod = 300;
+		}
 		if (typeof this.state.nextCaptureTime != "number") {
 			this.state.nextCaptureTime = 0;
 		}
@@ -105,216 +115,239 @@ class TimelapseCaptureIntent extends IntentBase {
 			this.state.nextCaptureTime = max;
 		}
 
-		this.dataPath = Path.join (App.DATA_DIRECTORY, App.CameraCachePath);
+		this.dataPath = Path.join (App.DATA_DIRECTORY, App.CameraCachePath, `${this.state.sensor}`);
+
+		if (this.server != null) {
+			this.serverSensor = this.server.sensors[`${this.state.sensor}`];
+			this.serverSensor.isCapturing = true;
+			this.serverSensor.capturePeriod = this.state.capturePeriod;
+		}
 	}
 
-	// Perform actions appropriate for the current state of the application
-	doUpdate () {
-		let shouldcapture;
+	doStop () {
+		if (this.captureProcess != null) {
+			this.captureProcess.stop ();
+			this.captureProcess = null;
+		}
+		if (this.server != null) {
+			this.serverSensor.isCapturing = false;
+			this.serverSensor.capturePeriod = 0;
+		}
+	}
 
-		if (! this.isCaptureReady) {
-			if (! this.isScanningDirectory) {
-				this.scanDirectory ();
+	// Execute actions appropriate for the current state of the application
+	doUpdate () {
+		if (this.stage == "") {
+			this.setStage (Initializing);
+		}
+		if (this.isCapturing && (this.captureProcess != null) && (this.killTime > 0) && (this.updateTime >= this.killTime)) {
+			++(this.killCount);
+			this.killTime = 0;
+			this.captureProcess.stop ();
+			this.captureProcess = null;
+		}
+	}
+
+	// Stage methods
+	initializing () {
+		this.stageAwait (FsUtil.createDirectory (this.dataPath), Initializing2);
+	}
+
+	initializing2 () {
+		if (this.stagePromiseError != null) {
+			Log.err (`${this.toString ()} failed to create directory; dataPath=${this.dataPath} err=${this.stagePromiseError}`);
+			this.stageAwait (this.timeoutWait (180000), Initializing);
+			return;
+		}
+		this.stageAwait (TimelapseCaptureIntent.readCacheSummary (this.dataPath), Initializing3);
+  }
+
+	initializing3 () {
+		const result = this.stagePromiseResult;
+		if (result == null) {
+			if (this.stagePromiseError != null) {
+				Log.err (`${this.toString ()} failed to scan directory; dataPath=${this.dataPath} err=${this.stagePromiseError}`);
+			}
+			this.stageAwait (this.timeoutWait (180000), Initializing);
+			return;
+		}
+		this.captureDirectoryTimes = result.captureDirectoryTimes;
+		this.capturePath = result.capturePath;
+		this.capturePathCount = result.capturePathCount;
+		this.lastCaptureFile = result.lastCaptureFile;
+		this.lastCaptureTime = result.lastCaptureTime;
+		this.lastCaptureWidth = result.lastCaptureWidth;
+		this.lastCaptureHeight = result.lastCaptureHeight;
+		this.setStage (Resting);
+	}
+
+	resting () {
+		if (this.server == null) {
+			return;
+		}
+		if (this.updateTime < this.state.nextCaptureTime) {
+			return;
+		}
+		if (this.server.cameraTaskGroup.runCount > 0) {
+			this.stageAwait (this.server.cameraTaskGroup.awaitIdle (), Resting2);
+			return;
+		}
+		this.state.nextCaptureTime = this.updateTime + (this.state.capturePeriod * 1000);
+		this.isCapturing = true;
+		this.stageAwait (this.captureImage (), CaptureEnd);
+	}
+
+	resting2 () {
+		this.setStage (Resting);
+	}
+
+	captureEnd () {
+		this.isCapturing = false;
+		if (this.stagePromiseError != null) {
+			Log.debug (`${this.toString ()} failed to capture image; capturePath=${this.capturePath} err=${this.stagePromiseError}`);
+			if (this.killCount >= KillRebootThreshold) {
+				this.killCount = 0;
+				Log.info (`${this.toString ()} reboot system for failure of camera system`);
+				App.systemAgent.runProcess (RebootProcessName).catch ((err) => {
+					Log.err (`${this.toString ()} error running reboot process; err=${err}`);
+				})
 			}
 			return;
 		}
-
-		if (! this.isCapturing) {
-			shouldcapture = false;
-			if (this.updateTime >= this.state.nextCaptureTime) {
-				shouldcapture = true;
-			}
-			if (shouldcapture) {
-				const server = App.systemAgent.getServer ("CameraServer");
-				if ((server != null) && server.isCapturingVideo) {
-					shouldcapture = false;
-				}
-			}
-			if (shouldcapture) {
-				this.captureImage ();
-				this.state.nextCaptureTime = this.updateTime + (this.state.capturePeriod * 1000);
-			}
-		}
-
-		if (this.isCapturing && (this.killTime > 0)) {
-			if (this.updateTime >= this.killTime) {
-				++(this.killCount);
-				this.killTime = 0;
-				App.systemAgent.runProcess (KillallProcessName, [
-					"-q", Path.basename (RaspistillProcessName)
-				]).catch ((err) => {
-					Log.err (`${this.toString ()} error stopping raspistill process; err=${err}`);
-				})
-			}
-		}
-	}
-
-	// Execute operations to read cache directories and file metadata, then prepare the cache directory to store capture images
-	scanDirectory () {
-		this.isScanningDirectory = true;
-
-		TimelapseCaptureIntent.readCacheSummary (this.dataPath).then ((resultObject) => {
-			this.captureDirectoryTimes = resultObject.captureDirectoryTimes;
-			this.capturePath = resultObject.capturePath;
-			this.capturePathCount = resultObject.capturePathCount;
-			this.lastCaptureFile = resultObject.lastCaptureFile;
-			this.lastCaptureTime = resultObject.lastCaptureTime;
-			this.lastCaptureWidth = resultObject.lastCaptureWidth;
-			this.lastCaptureHeight = resultObject.lastCaptureHeight;
-		}).catch ((err) => {
-			Log.err (`${this.toString ()} failed to scan directory; dataPath=${this.dataPath} err=${err}`);
-		}).then (() => {
-			this.isScanningDirectory = false;
-			this.isCaptureReady = true;
-		});
+		this.server.getDiskSpaceTask.setNextRepeat (0);
+		this.stageAwait (this.pruneCacheFiles (), Resting);
 	}
 
 	// Execute operations to capture and store a camera image
-	captureImage () {
-		let imagepath, imageprofile, imagewidth, imageheight, imagetime;
+	async captureImage () {
+		let imagewidth, imageheight;
 
-		const server = App.systemAgent.getServer ("CameraServer");
-
-		this.isCapturing = true;
 		if ((this.capturePath == "") || (this.capturePathCount >= MaxCaptureDirectoryCount)) {
 			const now = Date.now ();
 			this.capturePath = Path.join (this.dataPath, `${now}`);
 			this.captureDirectoryTimes.push (now);
 			this.capturePathCount = 0;
 		}
-		FsUtil.createDirectory (this.capturePath).then (() => {
-			const args = [
-				"-t", "1",
-				"-e", "jpg",
-				"-q", "97"
-			];
+		await FsUtil.createDirectory (this.capturePath);
+		const args = [ ];
+		const raspistill = (this.captureProcessName == RaspistillProcessName);
+		if (raspistill) {
+			args.push ("-t", "1");
+			args.push ("-e", "jpg");
+			args.push ("-q", "97");
+		}
+		args.push (raspistill ? "-cs" : "--camera", `${this.state.sensor}`);
 
-			imageprofile = SystemInterface.Constant.DefaultImageProfile;
-			if ((App.systemAgent.runState.cameraConfiguration != null) && (typeof App.systemAgent.runState.cameraConfiguration.imageProfile == "number")) {
-				imageprofile = App.systemAgent.runState.cameraConfiguration.imageProfile;
+		const imageprofile = this.server.getCameraConfigurationValue (this.state.sensor, "imageProfile", SystemInterface.Constant.DefaultImageProfile);
+		switch (imageprofile) {
+			case SystemInterface.Constant.HighQualityImageProfile: {
+				imagewidth = MaxImageWidth;
+				imageheight = MaxImageHeight;
+				break;
 			}
-			switch (imageprofile) {
-				case SystemInterface.Constant.HighQualityImageProfile: {
-					imagewidth = MaxImageWidth;
-					imageheight = MaxImageHeight;
-					break;
-				}
-				case SystemInterface.Constant.LowQualityImageProfile: {
-					imagewidth = Math.floor (MaxImageWidth / 4);
-					imageheight = Math.floor (MaxImageHeight / 4);
-					break;
-				}
-				case SystemInterface.Constant.LowestQualityImageProfile: {
-					imagewidth = Math.floor (MaxImageWidth / 8);
-					imageheight = Math.floor (MaxImageHeight / 8);
-					break;
-				}
-				default: {
-					imagewidth = Math.floor (MaxImageWidth / 2);
-					imageheight = Math.floor (MaxImageHeight / 2);
-					break;
-				}
+			case SystemInterface.Constant.LowQualityImageProfile: {
+				imagewidth = Math.floor (MaxImageWidth / 4);
+				imageheight = Math.floor (MaxImageHeight / 4);
+				break;
 			}
+			case SystemInterface.Constant.LowestQualityImageProfile: {
+				imagewidth = Math.floor (MaxImageWidth / 8);
+				imageheight = Math.floor (MaxImageHeight / 8);
+				break;
+			}
+			default: {
+				imagewidth = Math.floor (MaxImageWidth / 2);
+				imageheight = Math.floor (MaxImageHeight / 2);
+				break;
+			}
+		}
+		if (imagewidth < 1) {
+			imagewidth = 1;
+		}
+		if (imageheight < 1) {
+			imageheight = 1;
+		}
+		args.push (raspistill ? "-w" : "--width", imagewidth);
+		args.push (raspistill ? "-h" : "--height", imageheight);
 
-			if (imagewidth < 1) {
-				imagewidth = 1;
+		const flip = this.server.getCameraConfigurationValue (this.state.sensor, "flip", SystemInterface.Constant.NoFlip);
+		switch (flip) {
+			case SystemInterface.Constant.HorizontalFlip: {
+				args.push (raspistill ? "-hf" : "--hflip");
+				break;
 			}
-			if (imageheight < 1) {
-				imageheight = 1;
+			case SystemInterface.Constant.VerticalFlip: {
+				args.push (raspistill ? "-vf" : "--vflip");
+				break;
 			}
-			args.push ("-w", imagewidth);
-			args.push ("-h", imageheight);
+			case SystemInterface.Constant.HorizontalAndVerticalFlip: {
+				args.push (raspistill ? "-hf" : "--hflip");
+				args.push (raspistill ? "-vf" : "--vflip");
+				break;
+			}
+		}
 
-			if ((App.systemAgent.runState.cameraConfiguration != null) && (typeof App.systemAgent.runState.cameraConfiguration.flip == "number")) {
-				switch (App.systemAgent.runState.cameraConfiguration.flip) {
-					case SystemInterface.Constant.HorizontalFlip: {
-						args.push ("-hf");
-						break;
-					}
-					case SystemInterface.Constant.VerticalFlip: {
-						args.push ("-vf");
-						break;
-					}
-					case SystemInterface.Constant.HorizontalAndVerticalFlip: {
-						args.push ("-hf");
-						args.push ("-vf");
-						break;
-					}
-				}
-			}
+		const imagetime = Date.now ();
+		const imagepath = Path.join (this.capturePath, `${imagetime}_${imagewidth}x${imageheight}.jpg`);
+		args.push ("-o", imagepath);
+		if (this.server.isCaptureRebootEnabled) {
+			this.killTime = imagetime + CaptureKillTimeout;
+		}
 
-			imagetime = Date.now ();
-			imagepath = Path.join (this.capturePath, `${imagetime}_${imagewidth}x${imageheight}.jpg`);
-			args.push ("-o", imagepath);
-			if ((server != null) && server.isCaptureRebootEnabled) {
-				this.killTime = imagetime + RaspistillKillTimeout;
-			}
-			return (App.systemAgent.runProcess (RaspistillProcessName, args, { }, this.dataPath, (lines, parseCallback) => {
-				for (const line of lines) {
-					Log.debug (`${RaspistillProcessName}: ${line}`);
+		const task = new ExecuteTask ({
+			run: async () => {
+				const proc = new ExecProcess (this.captureProcessName, args);
+				proc.workingPath = this.dataPath;
+				this.captureProcess = proc;
+				const isExitSuccess = await proc.awaitEnd ();
+				if (this.captureProcess == proc) {
+					this.captureProcess = null;
 				}
-				process.nextTick (parseCallback);
-			}));
-		}).then ((isExitSuccess) => {
-			this.killTime = 0;
-			if (! isExitSuccess) {
-				return (Promise.reject (Error ("Image capture process ended with non-success result")));
-			}
-			this.killCount = 0;
-			return (FsUtil.fileExists (imagepath))
-		}).then ((exists) => {
-			if (! exists) {
-				return (Promise.reject (Error ("Image capture process failed to create output file")));
-			}
-
-			this.lastCaptureFile = imagepath;
-			this.lastCaptureTime = imagetime;
-			this.lastCaptureWidth = imagewidth;
-			this.lastCaptureHeight = imageheight;
-			++(this.capturePathCount);
-			if (server != null) {
-				server.captureDirectoryTimes = this.captureDirectoryTimes;
-				server.lastCaptureFile = this.lastCaptureFile;
-				server.lastCaptureTime = this.lastCaptureTime;
-				server.lastCaptureWidth = this.lastCaptureWidth;
-				server.lastCaptureHeight = this.lastCaptureHeight;
-				if (server.minCaptureTime <= 0) {
-					server.minCaptureTime = server.lastCaptureTime;
+				if (! isExitSuccess) {
+					throw Error ("Capture process failed");
 				}
-			}
-		}).catch ((err) => {
-			Log.err (`${this.toString ()} failed to capture image; capturePath=${this.capturePath} err=${err}`);
-			if (this.killCount >= KillRebootThreshold) {
-				this.killCount = 0;
-				Log.info (`${this.toString ()} reboot system for raspistill failure`);
-				App.systemAgent.runProcess (RebootProcessName).catch ((err) => {
-					Log.err (`${this.toString ()} error running reboot process; err=${err}`);
-				})
-			}
-		}).then (() => {
-			this.killTime = 0;
-			return (this.pruneCacheFiles ());
-		}).catch ((err) => {
-			Log.err (`${this.toString ()} failed to prune camera cache; path=${this.dataPath} err=${err}`);
-		}).then (() => {
-			this.isCapturing = false;
-			this.eventEmitter.emit (CaptureIdleEventName);
-			if (server != null) {
-				server.getDiskSpaceTask.setNextRepeat (0);
 			}
 		});
+		await this.server.cameraTaskGroup.awaitRun (task);
+		this.killTime = 0;
+		if (! task.isSuccess) {
+			throw Error ("Image capture process ended with non-success result");
+		}
+		this.killCount = 0;
+		const exists = await FsUtil.fileExists (imagepath);
+		if (! exists) {
+			throw Error ("Image capture process failed to create output file");
+		}
+
+		this.lastCaptureFile = imagepath;
+		this.lastCaptureTime = imagetime;
+		this.lastCaptureWidth = imagewidth;
+		this.lastCaptureHeight = imageheight;
+		++(this.capturePathCount);
+		this.serverSensor.captureDirectoryTimes = this.captureDirectoryTimes;
+		this.serverSensor.lastCaptureFile = this.lastCaptureFile;
+		this.serverSensor.lastCaptureTime = this.lastCaptureTime;
+		this.serverSensor.lastCaptureWidth = this.lastCaptureWidth;
+		this.serverSensor.lastCaptureHeight = this.lastCaptureHeight;
+		if (this.serverSensor.minCaptureTime <= 0) {
+			this.serverSensor.minCaptureTime = this.serverSensor.lastCaptureTime;
+		}
 	}
 
 	// Remove the oldest files from the cache as needed to maintain the configured percentage of free storage space
 	async pruneCacheFiles () {
 		let bytes, dirfiles, mintime;
 
-		const server = App.systemAgent.getServer ("CameraServer");
-		if ((server == null) || (server.totalStorage <= 0) || (this.captureDirectoryTimes.length <= 0)) {
+		if ((this.server.totalStorage <= 0) || (this.captureDirectoryTimes.length <= 0)) {
 			return;
 		}
-
-		const df = await Task.executeTask ("GetDiskSpace", { targetPath: this.dataPath });
+		const task = await App.systemAgent.runBackgroundTask (new GetDiskSpaceTask ({
+			targetPath: this.dataPath
+		}));
+		if (! task.isSuccess) {
+			return;
+		}
+		const df = task.resultObject;
 		if (df.total <= 0) {
 			return;
 		}
@@ -322,7 +355,6 @@ class TimelapseCaptureIntent extends IntentBase {
 		if (pct < PruneTriggerPercent) {
 			return;
 		}
-
 		bytes = df.free;
 		const targetbytes = Math.floor ((df.total * (100 - PruneTargetPercent)) / 100);
 		const imagefiles = [ ];
@@ -379,12 +411,12 @@ class TimelapseCaptureIntent extends IntentBase {
 			const pos = this.captureDirectoryTimes.indexOf (+dirname);
 			if (pos >= 0) {
 				this.captureDirectoryTimes.splice (pos, 1);
-				server.captureDirectoryTimes = this.captureDirectoryTimes;
+				this.serverSensor.captureDirectoryTimes = this.captureDirectoryTimes;
 			}
 			await FsUtil.removeDirectory (dirpath);
 
 			if (this.captureDirectoryTimes.length <= 0) {
-				server.clearCacheMetadata ();
+				this.server.clearCacheMetadata (this.state.sensor);
 			}
 			else {
 				mintime = 0;
@@ -397,11 +429,11 @@ class TimelapseCaptureIntent extends IntentBase {
 						}
 					}
 				}
-				server.minCaptureTime = mintime;
+				this.serverSensor.minCaptureTime = mintime;
 			}
 		}
 		else {
-			server.minCaptureTime = imagefiles[0].time;
+			this.serverSensor.minCaptureTime = imagefiles[0].time;
 		}
 	}
 }
@@ -418,7 +450,6 @@ TimelapseCaptureIntent.parseImageFilename = (filename) => {
 	if (isNaN (t) || isNaN (w) || isNaN (h)) {
 		return (null);
 	}
-
 	return ({
 		filename: filename,
 		time: t,
@@ -441,7 +472,6 @@ TimelapseCaptureIntent.readCacheSummary = async (cachePath) => {
 		capturePath: "",
 		capturePathCount: 0
 	};
-
 	files = await FsUtil.readDirectory (cachePath);
 	for (const file of files) {
 		if (file.match (/^[0-9]+$/)) {
@@ -503,32 +533,32 @@ TimelapseCaptureIntent.findCaptureImages = async (cmdInv, cameraServer) => {
 	const result = {
 		captureTimes: [ ]
 	};
-	if ((! Array.isArray (cameraServer.captureDirectoryTimes)) || (cameraServer.captureDirectoryTimes.length <= 0)) {
+	const sensor = cameraServer.sensors[`${cmdInv.params.sensor}`];
+	if ((sensor == null) || (! Array.isArray (sensor.captureDirectoryTimes)) || (sensor.captureDirectoryTimes.length <= 0)) {
 		return (result);
 	}
 	mintime = cmdInv.params.minTime;
 	if (mintime <= 0) {
-		mintime = cameraServer.minCaptureTime;
+		mintime = sensor.minCaptureTime;
 	}
 	maxtime = cmdInv.params.maxTime;
 	if (maxtime <= 0) {
-		maxtime = cameraServer.lastCaptureTime;
+		maxtime = sensor.lastCaptureTime;
 	}
 
 	const dirpaths = [ ];
 	if (cmdInv.params.isDescending) {
-		i = cameraServer.captureDirectoryTimes.length - 1;
+		i = sensor.captureDirectoryTimes.length - 1;
 		while (i > 0) {
-			if (cameraServer.captureDirectoryTimes[i] <= maxtime) {
+			if (sensor.captureDirectoryTimes[i] <= maxtime) {
 				break;
 			}
 			--i;
 		}
 		while (i >= 0) {
-			dirpaths.push (Path.join (cameraServer.cacheDataPath, `${cameraServer.captureDirectoryTimes[i]}`));
+			dirpaths.push (Path.join (cameraServer.cacheDataPath, `${cmdInv.params.sensor}`, `${sensor.captureDirectoryTimes[i]}`));
 			--i;
 		}
-
 		sortCompare = (a, b) => {
 			if (a < b) {
 				return (1);
@@ -541,17 +571,16 @@ TimelapseCaptureIntent.findCaptureImages = async (cmdInv, cameraServer) => {
 	}
 	else {
 		i = 0;
-		while (i < (cameraServer.captureDirectoryTimes.length - 1)) {
-			if (cameraServer.captureDirectoryTimes[i] <= mintime) {
+		while (i < (sensor.captureDirectoryTimes.length - 1)) {
+			if (sensor.captureDirectoryTimes[i] <= mintime) {
 				break;
 			}
 			++i;
 		}
-		while (i < cameraServer.captureDirectoryTimes.length) {
-			dirpaths.push (Path.join (cameraServer.cacheDataPath, `${cameraServer.captureDirectoryTimes[i]}`));
+		while (i < sensor.captureDirectoryTimes.length) {
+			dirpaths.push (Path.join (cameraServer.cacheDataPath, `${cmdInv.params.sensor}`, `${sensor.captureDirectoryTimes[i]}`));
 			++i;
 		}
-
 		sortCompare = (a, b) => {
 			if (a < b) {
 				return (-1);
@@ -597,43 +626,34 @@ TimelapseCaptureIntent.findCaptureImages = async (cmdInv, cameraServer) => {
 	return (result);
 };
 
-// Return a promise that finds the path for the cache image specified by the provided GetCaptureImage command, resolving with a non-empty path value if successful, or an empty path value for a file not found result
-TimelapseCaptureIntent.getCaptureImagePath = (cmdInv, cameraServer) => {
-	return (new Promise ((resolve, reject) => {
-		let dirtime;
+// Find the path for the cache image specified by the provided GetCaptureImage command, returning a non-empty path value if successful or an empty path value for a file not found result
+TimelapseCaptureIntent.getCaptureImagePath = async (cmdInv, cameraServer) => {
+	let dirtime, result;
 
-		dirtime = 0;
-		for (const t of cameraServer.captureDirectoryTimes) {
-			if (t > cmdInv.params.imageTime) {
-				break;
-			}
-			dirtime = t;
+	const sensor = cameraServer.sensors[`${cmdInv.params.sensor}`];
+	if ((sensor == null) || (! Array.isArray (sensor.captureDirectoryTimes)) || (sensor.captureDirectoryTimes.length <= 0)) {
+		return ("");
+	}
+	dirtime = 0;
+	for (const t of sensor.captureDirectoryTimes) {
+		if (t > cmdInv.params.imageTime) {
+			break;
 		}
+		dirtime = t;
+	}
+	if (dirtime <= 0) {
+		return ("");
+	}
 
-		if (dirtime <= 0) {
-			resolve ("");
-			return;
+	const dirpath = Path.join (cameraServer.cacheDataPath, `${cmdInv.params.sensor}`, `${dirtime}`);
+	const files = await FsUtil.readDirectory (dirpath);
+	result = "";
+	for (const file of files) {
+		if (file.indexOf (`${cmdInv.params.imageTime}`) === 0) {
+			result = Path.join (dirpath, file);
+			break;
 		}
-
-		const dirpath = Path.join (cameraServer.cacheDataPath, `${dirtime}`);
-		FsUtil.readDirectory (dirpath, (err, files) => {
-			let result;
-
-			if (err != null) {
-				reject (err);
-				return;
-			}
-
-			result = "";
-			for (const file of files) {
-				if (file.indexOf (`${cmdInv.params.imageTime}`) === 0) {
-					result = Path.join (dirpath, file);
-					break;
-				}
-			}
-
-			resolve (result);
-		});
-	}));
+	}
+	return (result);
 };
 module.exports = TimelapseCaptureIntent;

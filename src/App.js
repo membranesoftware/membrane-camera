@@ -1,5 +1,5 @@
 /*
-* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
+* Copyright 2019-2022 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -33,7 +33,9 @@
 
 const Path = require ("path");
 
-exports.VERSION = "7-stable-b2fcd336";
+exports.APPLICATION_NAME = "Membrane Camera";
+exports.APPLICATION_PACKAGE_NAME = "MembraneCamera";
+exports.VERSION = "12-stable-53a08402";
 exports.AGENT_PLATFORM = "";
 
 exports.BASE_DIRECTORY = process.cwd ();
@@ -51,25 +53,21 @@ exports.UrlHostname = null;
 exports.TcpPort1 = 63738;
 exports.TcpPort2 = 63739;
 exports.UdpPort = 63738;
+exports.ExtTcpPort1 = 0;
+exports.ExtTcpPort2 = 0;
+exports.ExtUdpPort = 0;
 exports.LinkPath = "/";
 exports.EnableHttps = true;
 exports.AuthorizePath = "auth";
 exports.AuthorizeSecret = "";
 exports.AuthorizeTokenLength = 64;
 exports.AuthorizeSessionDuration = 60000; // milliseconds
+exports.InvokeServerName = "";
 exports.MaxTaskCount = 1;
 exports.OpensslPath = "";
-exports.MongodPath = "/usr/bin/mongod";
-exports.StorePort = 27017;
-exports.StoreDatabase = "membrane";
-exports.StoreCollection = "records";
-exports.StoreHost = "127.0.0.1";
-exports.StoreUsername = "";
-exports.StorePassword = "";
-exports.StoreRunPeriod = 60; // seconds
+exports.FfmpegPath = "";
 exports.Language = "";
 
-exports.ApplicationNewsUrl = "https://membranesoftware.com/application-news/";
 exports.IntentWritePeriod = 300; // seconds
 exports.HeartbeatPeriod = 500; // milliseconds
 exports.OpensslConfigFilename = "openssl.cnf";
@@ -79,6 +77,7 @@ exports.TlsCertFilename = "tls-cert.pem";
 exports.TlsCaPath = "/etc/ssl/certs/ca-certificates.crt";
 exports.Slash = "/";
 exports.DoubleSlash = `${exports.Slash}${exports.Slash}`;
+exports.ApplicationNewsUrl = `https:${exports.DoubleSlash}membranesoftware.com/application-news/`;
 exports.StreamCachePath = "stream-cache";
 exports.StreamHlsPath = "hls";
 exports.StreamDashPath = "dash";

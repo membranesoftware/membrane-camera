@@ -1,5 +1,5 @@
 /*
-* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
+* Copyright 2019-2022 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -27,13 +27,16 @@
 * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 * POSSIBILITY OF SUCH DAMAGE.
 */
-// Constants to use for result values
+// Utilities for operating system functions
 
 "use strict";
 
-exports.Success = 0;
-exports.InvalidParamsError = -1;
-exports.AlreadyStartedError = -2;
-exports.NotFoundError = -3;
-exports.UnknownTypeError = -4;
-exports.NotConnectedError = -5;
+const App = global.App || { };
+
+exports.isLinux = (process.platform === "linux");
+exports.isMacos = Array.isArray (App.AGENT_PLATFORM.match (/^macos/i));
+exports.isUbuntu = Array.isArray (App.AGENT_PLATFORM.match (/^ubuntu/i));
+exports.isRaspios = Array.isArray (App.AGENT_PLATFORM.match (/^raspios/i));
+exports.isRaspiosBuster = Array.isArray (App.AGENT_PLATFORM.match (/^raspios10-/i));
+exports.isRaspiosBullseye = Array.isArray (App.AGENT_PLATFORM.match (/^raspios11-/i));
+exports.isWindows = Array.isArray (App.AGENT_PLATFORM.match (/^win/i));

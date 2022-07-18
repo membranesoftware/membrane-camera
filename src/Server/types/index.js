@@ -1,5 +1,5 @@
 /*
-* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
+* Copyright 2019-2022 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -39,11 +39,9 @@ for (let i = 0; i < files.length; ++i) {
 	if (path == "index.js") {
 		continue;
 	}
-
 	const m = path.match (/^(.*)\.js$/);
 	if (m == null) {
 		continue;
 	}
-
 	exports[m[1]] = require (`./${path}`);
 }

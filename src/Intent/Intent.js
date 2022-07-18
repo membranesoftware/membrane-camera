@@ -1,5 +1,5 @@
 /*
-* Copyright 2019-2020 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
+* Copyright 2019-2022 Membrane Software <author@membranesoftware.com> https://membranesoftware.com
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are met:
@@ -33,42 +33,48 @@
 
 const App = global.App || { };
 const Path = require ("path");
-const Result = require (Path.join (App.SOURCE_DIRECTORY, "Result"));
 const SystemInterface = require (Path.join (App.SOURCE_DIRECTORY, "SystemInterface"));
 const IntentTypes = require ("./types");
 
 exports.IntentTypes = IntentTypes;
 
-// Return a newly created intent of the specified type name and configure it with the provided object. Returns null if the intent could not be created, indicating that the type name was not found or the configuration was not valid.
+// Return a newly created intent of the specified type name and configure it with the provided object
 exports.createIntent = (typeName, configureParams) => {
 	const type = IntentTypes[typeName];
 	if (type == null) {
-		return (null);
+		throw Error (`Unknown intent type ${typeName}`);
 	}
 
 	const intent = new type ();
+	intent.name = typeName;
 	if ((typeof configureParams != "object") || (configureParams == null)) {
 		configureParams = { };
 	}
-	if (intent.configure (configureParams) != Result.Success) {
-		return (null);
-	}
-
+	intent.configure (configureParams);
 	return (intent);
 };
 
-// Return a newly created intent, as constructed with the provided command, or null if the intent could not be created.
+// Return a newly created intent, as constructed with the provided command
 exports.createIntentFromCommand = (command) => {
+	let intent;
+
 	const cmd = SystemInterface.parseCommand (command);
 	if (SystemInterface.isError (cmd)) {
-		return (null);
+		throw Error (`Invalid intent create command; err=${cmd}`);
 	}
 
-	for (const type of Object.values (IntentTypes)) {
-		const intent = new type ();
-		if (intent.configureFromCommand (cmd) == Result.Success) {
+	for (const name of Object.keys (IntentTypes)) {
+		try {
+			intent = new IntentTypes[name] ();
+			intent.name = name;
+			intent.configureFromCommand (cmd);
+		}
+		catch (err) {
+			intent = null;
+		}
+		if (intent != null) {
 			return (intent);
 		}
 	}
-	return (null);
+	throw Error (`Invalid intent create command; err="Unknown command type ${cmd.command}"`);
 };
